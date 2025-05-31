@@ -20,7 +20,7 @@ static constexpr int INVALID_LSN = -1;
 // Type definitions
 using page_id_t = int32_t;
 using slot_offset_t = int32_t;
-using txn_id_t = int32_t;
+using txn_id_t = uint32_t;
 using lsn_t = int32_t;
 using oid_t = uint32_t;
 

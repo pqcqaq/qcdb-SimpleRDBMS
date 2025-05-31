@@ -19,10 +19,10 @@ public:
     Transaction* Begin(IsolationLevel isolation_level = IsolationLevel::REPEATABLE_READ);
     
     // Commit a transaction
-    void Commit(Transaction* txn);
+    bool Commit(Transaction* txn);
     
     // Abort a transaction
-    void Abort(Transaction* txn);
+    bool Abort(Transaction* txn);
     
     // Get lock manager
     LockManager* GetLockManager() { return lock_manager_; }

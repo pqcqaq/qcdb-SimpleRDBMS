@@ -33,13 +33,40 @@ set(CORE_SOURCES
     src/recovery/recovery_manager.cpp
 )
 
+set(SERVER_SOURCES
+    src/server/connection/connection.cpp
+    src/server/connection/connection_manager.cpp
+    src/server/connection/session.cpp
+    src/server/protocol/protocol_handler.cpp
+    src/server/protocol/simple_protocol.cpp
+    src/server/thread/thread_pool.cpp
+    src/server/thread/worker_thread.cpp
+    src/server/query/query_processor.cpp
+    src/server/query/query_context.cpp
+    src/server/config/server_config.cpp
+    src/server/config/config_manager.cpp
+    src/server/database_server.cpp
+)
+
 # 创建核心静态库
 add_library(simple_rdbms_core STATIC ${CORE_SOURCES})
+
+# 添加服务器源文件到核心库
+add_library(simple_rdbms_server_core STATIC ${SERVER_SOURCES})
 
 # 主程序
 add_executable(simple_rdbms src/main.cpp)
 target_link_libraries(simple_rdbms simple_rdbms_core)
 
+# Server
+add_executable(simple_rdbms_server 
+    src/server/server_main.cpp
+)
+target_link_libraries(simple_rdbms_server 
+    simple_rdbms_server_core
+    simple_rdbms_core
+    pthread
+)
 # 测试程序
 add_executable(test_main test/unit/test_main.cpp)
 target_link_libraries(test_main simple_rdbms_core)
@@ -62,9 +89,12 @@ target_link_libraries(comprehensive_test simple_rdbms_core)
 # 编译标志
 target_compile_options(simple_rdbms_core PRIVATE -Wall -Wextra)
 
+target_compile_options(simple_rdbms_server_core PRIVATE -Wall -Wextra)
+
 # 设置输出目录
 set_target_properties(simple_rdbms simple_rdbms_core test_main bplus_tree_test 
-                      simple_bplus_test update_delete_test comprehensive_test
+                      simple_bplus_test update_delete_test comprehensive_test 
+                        persistence_recovery_test simple_rdbms_server_core
                       PROPERTIES
                       RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}

@@ -23,6 +23,15 @@ bool ExecutionEngine::Execute(Statement* statement,
     LOG_DEBUG("ExecutionEngine::Execute: Starting execution");
     if (!statement || !result_set || !txn) {
         LOG_ERROR("ExecutionEngine::Execute: Invalid parameters");
+        if (!statement) {
+            LOG_ERROR("ExecutionEngine::Execute: Statement is null");
+        }
+        if (!result_set) {
+            LOG_ERROR("ExecutionEngine::Execute: Result set is null");
+        }
+        if (!txn) {
+            LOG_ERROR("ExecutionEngine::Execute: Transaction is null");
+        }
         return false;
     }
     LOG_DEBUG("ExecutionEngine::Execute: Statement type: "

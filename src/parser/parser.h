@@ -14,6 +14,12 @@ class Parser {
     explicit Parser(const std::string& sql);
     std::unique_ptr<Statement> Parse();
 
+    // SetQuery
+    void SetQuery(const std::string& sql) {
+        lexer_ = Lexer(sql);
+        Advance();
+    }
+
    private:
     Lexer lexer_;
     Token current_token_;
