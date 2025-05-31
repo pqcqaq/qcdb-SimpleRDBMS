@@ -37,6 +37,8 @@ class Catalog {
    public:
     explicit Catalog(BufferPoolManager* buffer_pool_manager);
 
+    ~Catalog();
+
     // Table operations
     bool CreateTable(const std::string& table_name, const Schema& schema);
     bool DropTable(const std::string& table_name);
@@ -60,6 +62,16 @@ class Catalog {
     void DebugPrintTables() const;
     // 获取所有表名
     std::vector<std::string> GetAllTableNames() const;
+
+    void Shutdown() {
+        try {
+            SaveCatalogToDisk();
+            buffer_pool_manager_ =
+                nullptr;  // Don't access buffer pool after shutdown
+        } catch (const std::exception& e) {
+            LOG_WARN("Catalog::Shutdown: " << e.what());
+        }
+    }
 
    private:
     BufferPoolManager* buffer_pool_manager_;

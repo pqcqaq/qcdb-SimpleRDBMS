@@ -31,13 +31,14 @@ Value ExpressionEvaluator::Evaluate(const Expression* expr,
     }
 }
 
-bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr, const Tuple& tuple) {
+bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr,
+                                            const Tuple& tuple) {
     Value result = Evaluate(expr, tuple);
     bool bool_result = IsValueTrue(result);
-    
+
     // 添加调试输出
     LOG_DEBUG("EvaluateAsBoolean: result = " << bool_result);
-    
+
     return bool_result;
 }
 
@@ -51,11 +52,21 @@ Value ExpressionEvaluator::EvaluateColumnRef(const ColumnRefExpression* expr,
                                              const Tuple& tuple) {
     const std::string& column_name = expr->GetColumnName();
     try {
+        if (!schema_) {
+            throw ExecutionException("Schema is null in expression evaluator");
+        }
+
         size_t column_idx = schema_->GetColumnIdx(column_name);
-        if (column_idx >= tuple.GetValues().size()) {
+        const auto& tuple_values = tuple.GetValues();
+
+        if (column_idx >= tuple_values.size()) {
+            LOG_ERROR("EvaluateColumnRef: Column index "
+                      << column_idx << " out of range, tuple has "
+                      << tuple_values.size() << " values");
             throw ExecutionException("Column index out of range: " +
                                      column_name);
         }
+
         return tuple.GetValue(column_idx);
     } catch (const std::exception& e) {
         throw ExecutionException("Column not found or invalid: " + column_name +

@@ -19,6 +19,7 @@ set(CORE_SOURCES
     src/record/table_heap.cpp
     src/record/tuple.cpp
     src/index/b_plus_tree.cpp
+    src/index/index_manager.cpp
     src/index/b_plus_tree_page.cpp
     src/parser/parser.cpp
     src/execution/execution_engine.cpp
@@ -85,6 +86,15 @@ target_link_libraries(persistence_recovery_test simple_rdbms_core)
 
 add_executable(comprehensive_test test/comprehensive_test.cpp)
 target_link_libraries(comprehensive_test simple_rdbms_core)
+
+# simple_index_manager_test
+add_executable(simple_index_manager_test test/unit/simple_index_manager_test.cpp)
+target_link_libraries(simple_index_manager_test simple_rdbms_core)
+
+# index_manager_test
+
+add_executable(index_manager_test test/unit/index_manager_test.cpp)
+target_link_libraries(index_manager_test simple_rdbms_core gtest)
 
 # 编译标志
 target_compile_options(simple_rdbms_core PRIVATE -Wall -Wextra)

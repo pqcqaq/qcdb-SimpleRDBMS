@@ -28,9 +28,9 @@ public:
     IndexPageType GetPageType() const { return page_type_; }
     
     int GetSize() const { return size_; }
-    void SetSize(int size) { size_ = size; }
-    void IncreaseSize(int amount) { size_ += amount; }
-    
+    void SetSize(int size);
+    void IncreaseSize(int amount);
+
     int GetMaxSize() const { return max_size_; }
     void SetMaxSize(int max_size) { max_size_ = max_size; }
     

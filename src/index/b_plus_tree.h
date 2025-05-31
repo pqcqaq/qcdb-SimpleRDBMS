@@ -16,7 +16,7 @@ template <typename KeyType, typename ValueType>
 class BPlusTree {
 public:
     BPlusTree(const std::string& name, BufferPoolManager* buffer_pool_manager);
-    
+    ~BPlusTree();
     // Point operations
     bool Insert(const KeyType& key, const ValueType& value, txn_id_t txn_id = -1);
     bool Remove(const KeyType& key, txn_id_t txn_id = -1);

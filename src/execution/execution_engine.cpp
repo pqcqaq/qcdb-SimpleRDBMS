@@ -96,7 +96,7 @@ bool ExecutionEngine::Execute(Statement* statement,
     }
 
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor context");
-    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_);
+    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_, table_manager_.get());
 
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor");
     auto executor = CreateExecutor(&exec_ctx, std::move(plan));

@@ -27,6 +27,7 @@ enum class TokenType {
     NOT,
     _NULL,
     INT,
+    BIGINT,
     VARCHAR,
     FLOAT,
     DOUBLE,

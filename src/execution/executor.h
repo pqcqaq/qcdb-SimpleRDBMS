@@ -20,24 +20,29 @@ class InsertPlanNode;
 class TableInfo;
 class UpdatePlanNode;
 class DeletePlanNode;
+class TableManager;  // 新增前向声明
 
 // Executor context (moved before Executor class)
 class ExecutorContext {
    public:
     ExecutorContext(Transaction* txn, Catalog* catalog,
-                    BufferPoolManager* buffer_pool_manager)
+                    BufferPoolManager* buffer_pool_manager,
+                    TableManager* table_manager)
         : transaction_(txn),
           catalog_(catalog),
-          buffer_pool_manager_(buffer_pool_manager) {}
+          buffer_pool_manager_(buffer_pool_manager),
+          table_manager_(table_manager) {}
 
     Transaction* GetTransaction() { return transaction_; }
     Catalog* GetCatalog() { return catalog_; }
     BufferPoolManager* GetBufferPoolManager() { return buffer_pool_manager_; }
+    TableManager* GetTableManager() { return table_manager_; }
 
    private:
     Transaction* transaction_;
     Catalog* catalog_;
     BufferPoolManager* buffer_pool_manager_;
+    TableManager* table_manager_;
 };
 
 // Base executor class

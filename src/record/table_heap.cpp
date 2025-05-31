@@ -16,18 +16,32 @@ struct Slot {
 void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     SetPageId(page_id);
     SetLSN(INVALID_LSN);
-    (void)prev_page_id;  // prev_page_id is not used in this implementation
-
-    // 首先清零整个页面数据
+    (void)prev_page_id;
+    
+    // Ensure the entire page is zeroed
     std::memset(GetData(), 0, PAGE_SIZE);
+    
     auto* header = GetHeader();
     header->next_page_id = INVALID_PAGE_ID;
     header->lsn = INVALID_LSN;
     header->num_tuples = 0;
     header->free_space_offset = PAGE_SIZE;
+
     LOG_DEBUG("TablePage::Init: initialized page "
               << page_id
-              << " with free_space_offset=" << header->free_space_offset);
+              << " with free_space_offset=" << header->free_space_offset
+              << " num_tuples=" << header->num_tuples
+              << " available_space=" << (PAGE_SIZE - sizeof(TablePageHeader)));
+
+    // Validation after initialization
+    if (header->free_space_offset != PAGE_SIZE || header->num_tuples != 0) {
+        LOG_ERROR("TablePage::Init: Initialization verification failed on page " << page_id << ": "
+                  << "free_space_offset=" << header->free_space_offset 
+                  << " num_tuples=" << header->num_tuples);
+        // Force correct values
+        header->free_space_offset = PAGE_SIZE;
+        header->num_tuples = 0;
+    }
 }
 
 bool TablePage::DeleteTuple(const RID& rid) {
@@ -117,71 +131,81 @@ bool TablePage::GetTuple(const RID& rid, Tuple* tuple, const Schema* schema) {
 
 bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     auto* header = GetHeader();
-    // 添加边界检查
-    if (header->num_tuples == 0) {
-        LOG_DEBUG("TablePage::GetNextTupleRID: page has no tuples");
-        return false;
-    }
-
-    // 根据页面大小动态计算合理的最大记录数
-    // 页面头大小 + 最小记录大小(假设16字节) + slot大小(8字节)
+    
+    // Enhanced corruption detection and recovery
     const size_t page_header_size = sizeof(TablePageHeader);
-    const size_t min_record_size = 16;  // 最小记录大小
+    const size_t min_record_size = 16;
     const size_t slot_size = sizeof(Slot);
     const int max_reasonable_tuples = static_cast<int>(
         (PAGE_SIZE - page_header_size) / (min_record_size + slot_size));
-
+    
+    // Check for corruption first
+    if (header->num_tuples < 0) {
+        LOG_ERROR("TablePage::GetNextTupleRID: Invalid num_tuples (negative): " 
+                  << header->num_tuples << " on page " << GetPageId());
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
+    
     if (header->num_tuples > max_reasonable_tuples) {
         LOG_ERROR("TablePage::GetNextTupleRID: num_tuples ("
                   << header->num_tuples << ") exceeds reasonable limit ("
-                  << max_reasonable_tuples << "), possible corruption");
+                  << max_reasonable_tuples << ") on page " << GetPageId() 
+                  << ", resetting page.");
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
         return false;
     }
-
-    // 添加free_space_offset的合理性检查
+    
     if (header->free_space_offset > PAGE_SIZE ||
         header->free_space_offset < sizeof(TablePageHeader)) {
         LOG_ERROR("TablePage::GetNextTupleRID: invalid free_space_offset="
-                  << header->free_space_offset << " (should be between "
-                  << sizeof(TablePageHeader) << " and " << PAGE_SIZE << ")");
+                  << header->free_space_offset << " on page " << GetPageId()
+                  << " (should be between " << sizeof(TablePageHeader) 
+                  << " and " << PAGE_SIZE << "), resetting page.");
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
+
+    if (header->num_tuples == 0) {
+        LOG_DEBUG("TablePage::GetNextTupleRID: page " << GetPageId() << " has no tuples");
         return false;
     }
 
     Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
-    // 从当前slot的下一个位置开始查找
     int start_slot = current_rid.slot_num + 1;
-    // 确保start_slot在合理范围内
     if (start_slot < 0) {
         start_slot = 0;
     }
 
     LOG_DEBUG("TablePage::GetNextTupleRID: searching from slot "
               << start_slot << ", total slots: " << header->num_tuples
-              << ", free_space_offset: " << header->free_space_offset);
+              << ", free_space_offset: " << header->free_space_offset
+              << " on page " << GetPageId());
 
     for (int i = start_slot; i < header->num_tuples; i++) {
-        // 改进有效性检查：检查slot的合理性
+        // Additional slot validation
         if (slots[i].size > 0 && slots[i].size <= PAGE_SIZE &&
-            slots[i].offset >=
-                header->free_space_offset &&  // offset不能小于free_space_offset
-            slots[i].offset + slots[i].size <= PAGE_SIZE &&  // 不能超出页面边界
-            slots[i].offset >= sizeof(TablePageHeader)) {    // 不能覆盖页面头
-
+            slots[i].offset >= header->free_space_offset &&
+            slots[i].offset + slots[i].size <= PAGE_SIZE &&
+            slots[i].offset >= sizeof(TablePageHeader)) {
             next_rid->page_id = GetPageId();
             next_rid->slot_num = i;
             LOG_DEBUG("TablePage::GetNextTupleRID: found valid tuple at slot "
                       << i << " offset=" << slots[i].offset
-                      << " size=" << slots[i].size);
+                      << " size=" << slots[i].size << " on page " << GetPageId());
             return true;
         } else if (slots[i].size > 0) {
             LOG_WARN("TablePage::GetNextTupleRID: invalid slot "
                      << i << " size=" << slots[i].size
                      << " offset=" << slots[i].offset << " (free_space_offset="
-                     << header->free_space_offset << ")");
+                     << header->free_space_offset << ") on page " << GetPageId());
         }
     }
 
-    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found");
+    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found on page " << GetPageId());
     return false;
 }
 
@@ -242,8 +266,8 @@ TableHeap::~TableHeap() = default;
 
 bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
     page_id_t current_page_id = first_page_id_;
-    (void)txn_id;  // Unused parameter, can be used for logging or future
-                   // enhancements
+    (void)txn_id;
+    
     while (current_page_id != INVALID_PAGE_ID) {
         Page* page = buffer_pool_manager_->FetchPage(current_page_id);
         if (page == nullptr) {
@@ -251,14 +275,19 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
         }
         page->WLatch();
         auto* table_page = reinterpret_cast<TablePage*>(page);
+        
+        // 尝试在当前页面插入
         if (table_page->InsertTuple(tuple, rid)) {
             page->SetLSN(0);
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             return true;
         }
+        
+        // 当前页面空间不足，检查是否有下一个页面
         page_id_t next_page_id = table_page->GetNextPageId();
         if (next_page_id == INVALID_PAGE_ID) {
+            // 没有下一个页面，创建新页面
             page_id_t new_page_id;
             Page* new_page = buffer_pool_manager_->NewPage(&new_page_id);
             if (new_page == nullptr) {
@@ -266,18 +295,40 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
                 buffer_pool_manager_->UnpinPage(current_page_id, false);
                 return false;
             }
+            
+            // 初始化新页面
             new_page->WLatch();
             auto* new_table_page = reinterpret_cast<TablePage*>(new_page);
             new_table_page->Init(new_page_id, current_page_id);
+            
+            // 链接到新页面
             table_page->SetNextPageId(new_page_id);
-            new_page->WUnlatch();
-            buffer_pool_manager_->UnpinPage(new_page_id, true);
-            next_page_id = new_page_id;
+            page->WUnlatch();
+            buffer_pool_manager_->UnpinPage(current_page_id, true);
+            
+            // 直接在新页面上尝试插入
+            if (new_table_page->InsertTuple(tuple, rid)) {
+                new_page->SetLSN(0);
+                new_page->WUnlatch();
+                buffer_pool_manager_->UnpinPage(new_page_id, true);
+                return true;
+            } else {
+                // 即使在空页面上也无法插入，说明记录太大
+                LOG_ERROR("TableHeap::InsertTuple: Tuple too large to fit in empty page. "
+                         << "Tuple size: " << tuple.GetSerializedSize() 
+                         << ", Page size: " << PAGE_SIZE);
+                new_page->WUnlatch();
+                buffer_pool_manager_->UnpinPage(new_page_id, true);
+                return false;
+            }
+        } else {
+            // 有下一个页面，移动到下一个页面
+            page->WUnlatch();
+            buffer_pool_manager_->UnpinPage(current_page_id, false);
+            current_page_id = next_page_id;
         }
-        page->WUnlatch();
-        buffer_pool_manager_->UnpinPage(current_page_id, true);
-        current_page_id = next_page_id;
     }
+    
     return false;
 }
 
@@ -291,32 +342,45 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
               << " current_tuples=" << header->num_tuples
               << " free_space_offset=" << header->free_space_offset);
 
-    // 添加合理性检查
+    // Enhanced validation
     if (tuple_size == 0 || tuple_size > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size);
+        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size << " on page " << GetPageId());
+        return false;
+    }
+
+    // Check for corruption before proceeding
+    if (header->num_tuples < 0 || header->num_tuples > (PAGE_SIZE / 8)) {
+        LOG_ERROR("TablePage::InsertTuple: corrupted num_tuples=" << header->num_tuples << " on page " << GetPageId());
+        return false;
+    }
+
+    if (header->free_space_offset < sizeof(TablePageHeader) || header->free_space_offset > PAGE_SIZE) {
+        LOG_ERROR("TablePage::InsertTuple: corrupted free_space_offset=" << header->free_space_offset << " on page " << GetPageId());
         return false;
     }
 
     size_t required_space = tuple_size + slot_size;
-    size_t slot_end_offset =
-        sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
-
-    // 检查free_space_offset的合理性
-    if (header->free_space_offset < slot_end_offset ||
-        header->free_space_offset > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid free_space_offset="
-                  << header->free_space_offset
-                  << " slot_end_offset=" << slot_end_offset);
+    size_t slot_end_offset = sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
+    
+    if (header->free_space_offset < slot_end_offset) {
+        LOG_ERROR("TablePage::InsertTuple: free_space_offset=" << header->free_space_offset
+                  << " < slot_end_offset=" << slot_end_offset << " on page " << GetPageId());
         return false;
     }
 
     size_t free_space = header->free_space_offset - slot_end_offset;
     if (free_space < required_space) {
-        LOG_WARN("TablePage::InsertTuple: insufficient space. required="
-                 << required_space << " available=" << free_space);
+        LOG_DEBUG("TablePage::InsertTuple: insufficient space. required="
+                 << required_space << " available=" << free_space
+                 << " (tuple_size=" << tuple_size << ", slot_size=" << slot_size
+                 << ", num_tuples=" << header->num_tuples
+                 << ", slot_end_offset=" << slot_end_offset 
+                 << ", free_space_offset=" << header->free_space_offset 
+                 << ") on page " << GetPageId());
         return false;
     }
 
+    // Perform the insertion
     header->free_space_offset -= tuple_size;
     char* tuple_data = GetData() + header->free_space_offset;
     tuple.SerializeTo(tuple_data);
@@ -330,7 +394,7 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
 
     LOG_DEBUG("TablePage::InsertTuple: inserted at slot "
               << header->num_tuples << " offset=" << header->free_space_offset
-              << " size=" << tuple_size);
+              << " size=" << tuple_size << " on page " << GetPageId());
 
     header->num_tuples++;
     return true;

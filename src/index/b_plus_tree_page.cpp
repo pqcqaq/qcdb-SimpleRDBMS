@@ -3,6 +3,7 @@
 #include "index/b_plus_tree_page.h"
 #include "buffer/buffer_pool_manager.h"
 #include "common/types.h"
+#include "common/debug.h"
 #include <algorithm>
 #include <cstring>
 
@@ -29,6 +30,26 @@ void BPlusTreeLeafPage<KeyType, ValueType>::Init(page_id_t page_id, page_id_t pa
     SetMaxSize(std::max(16, theoretical_max - 1));
     
     next_page_id_ = INVALID_PAGE_ID;
+}
+
+void BPlusTreePage::SetSize(int size) { 
+    if (size < 0) {
+        LOG_ERROR("BPlusTreePage::SetSize: Attempting to set negative size " << size);
+        size_ = 0;
+    } else {
+        size_ = size; 
+    }
+}
+
+void BPlusTreePage::IncreaseSize(int amount) { 
+    int new_size = size_ + amount;
+    if (new_size < 0) {
+        LOG_ERROR("BPlusTreePage::IncreaseSize: Size would become negative: " 
+                  << size_ << " + " << amount << " = " << new_size);
+        size_ = 0;
+    } else {
+        size_ = new_size;
+    }
 }
 
 template <typename KeyType, typename ValueType>
@@ -97,6 +118,34 @@ int BPlusTreeLeafPage<KeyType, ValueType>::KeyIndex(const KeyType& key) const {
     return left; // 返回插入位置
 }
 
+template <typename KeyType>
+int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
+    int size = GetSize();
+    if (size <= 0) {
+        LOG_WARN("BPlusTreeInternalPage::KeyIndex: Invalid size " << size);
+        return 0;
+    }
+    
+    // 确保不会访问越界
+    for (int i = 1; i <= size; i++) {
+        try {
+            if (i > GetMaxSize()) {
+                LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Index " << i 
+                          << " exceeds max size " << GetMaxSize());
+                return 0;
+            }
+            if (key < KeyAt(i)) {
+                return i - 1;
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at index " << i 
+                      << " with size " << size << ": " << e.what());
+            return 0;
+        }
+    }
+    return size;
+}
+
 template <typename KeyType, typename ValueType>
 bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& value) {
     // 首先检查是否已经满了
@@ -132,24 +181,30 @@ bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key, const Val
 
 template <typename KeyType, typename ValueType>
 bool BPlusTreeLeafPage<KeyType, ValueType>::Delete(const KeyType& key) {
-    int delete_index = KeyIndex(key);
-    
-    // 检查键是否存在
-    if (delete_index >= GetSize() || KeyAt(delete_index) != key) {
-        return false; // 键不存在
+    if (GetSize() <= 0) {
+        LOG_WARN("BPlusTreeLeafPage::Delete: Attempting to delete from empty page");
+        return false;
     }
     
-    // 通过移动元素来删除键值对
+    int delete_index = KeyIndex(key);
+    if (delete_index >= GetSize() || KeyAt(delete_index) != key) {
+        return false;
+    }
+    
     size_t pair_size = sizeof(KeyType) + sizeof(ValueType);
     int move_count = GetSize() - delete_index - 1;
-    
     if (move_count > 0) {
         std::memmove(data_ + delete_index * pair_size,
                      data_ + (delete_index + 1) * pair_size,
                      move_count * pair_size);
     }
     
-    IncreaseSize(-1);
+    // 确保 size 不会变成负数
+    if (GetSize() > 0) {
+        IncreaseSize(-1);
+    } else {
+        LOG_WARN("BPlusTreeLeafPage::Delete: Page size already 0, cannot decrease");
+    }
     return true;
 }
 
@@ -204,22 +259,22 @@ void BPlusTreeLeafPage<KeyType, ValueType>::MoveFirstToEndOf(BPlusTreeLeafPage* 
 
 template <typename KeyType, typename ValueType>
 void BPlusTreeLeafPage<KeyType, ValueType>::MoveLastToFrontOf(BPlusTreeLeafPage* recipient) {
-    if (GetSize() == 0) return;
+    if (GetSize() == 0) {
+        LOG_WARN("BPlusTreeLeafPage::MoveLastToFrontOf: Source page is empty");
+        return;
+    }
     
-    // 获取最后一个元素
     int last_index = GetSize() - 1;
     KeyType key = KeyAt(last_index);
     ValueType value = ValueAt(last_index);
     
-    // 从当前页面删除最后一个元素
+    // 先减少当前页面的大小
     IncreaseSize(-1);
     
-    // 在接收页面前端为新元素腾出空间
+    // 再移动数据到目标页面
     size_t pair_size = sizeof(KeyType) + sizeof(ValueType);
     std::memmove(recipient->data_ + pair_size, recipient->data_, 
                  recipient->GetSize() * pair_size);
-    
-    // 在接收页面前端插入元素
     recipient->SetKeyAt(0, key);
     recipient->SetValueAt(0, value);
     recipient->IncreaseSize(1);
@@ -244,30 +299,6 @@ void BPlusTreeInternalPage<KeyType>::Init(page_id_t page_id, page_id_t parent_id
     // 可容纳的键值对数量（不包括value0）
     int theoretical_max = static_cast<int>((available_space - sizeof(page_id_t)) / entry_size);
     SetMaxSize(std::max(16, theoretical_max - 1)); // 同样减少保留空间
-}
-
-// 修复后的 KeyIndex 函数
-template <typename KeyType>
-int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
-    if (GetSize() == 0) {
-        return 0;
-    }
-    
-    // 对于内部页面，查找合适的子页面
-    // 布局：[value0] [key1] [value1] [key2] [value2] ... [keyN] [valueN]
-    // 如果 key < key1，去 value0 (index=0)
-    // 如果 key1 <= key < key2，去 value1 (index=1)  
-    // 如果 key >= keyN，去 valueN (index=N)
-    
-    // 查找第一个大于key的键
-    for (int i = 1; i <= GetSize(); i++) {
-        if (key < KeyAt(i)) {
-            return i - 1;  // 返回前一个value的索引
-        }
-    }
-    
-    // 如果key大于等于所有键，返回最后一个value的索引
-    return GetSize();
 }
 
 template <typename KeyType>

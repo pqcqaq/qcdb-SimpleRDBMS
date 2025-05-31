@@ -56,6 +56,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"NULL", TokenType::_NULL},
     {"INT", TokenType::INT},
     {"INTEGER", TokenType::INT},
+    {"BIGINT", TokenType::BIGINT},
     {"VARCHAR", TokenType::VARCHAR},
     {"FLOAT", TokenType::FLOAT},
     {"DOUBLE", TokenType::DOUBLE},
@@ -576,6 +577,10 @@ TypeId Parser::ParseDataType() {
         case TokenType::INT:
             Advance();
             type = TypeId::INTEGER;
+            break;
+        case TokenType::BIGINT:
+            Advance();
+            type = TypeId::BIGINT;
             break;
         case TokenType::VARCHAR:
             Advance();

@@ -343,20 +343,28 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
 
 void BufferPoolManager::FlushAllPages() {
     std::unique_lock<std::mutex> lock(latch_);
-    
     LOG_INFO("Flushing all pages");
     
-    // Flush all pages in the buffer pool
+    int flushed_count = 0;
+    int error_count = 0;
+    
     for (size_t i = 0; i < pool_size_; i++) {
         Page* page = &pages_[i];
-        
-        // Only flush pages with valid page_id and that are dirty
         if (page->GetPageId() != INVALID_PAGE_ID && page->IsDirty()) {
-            LOG_DEBUG("Flushing page " << page->GetPageId());
-            disk_manager_->WritePage(page->GetPageId(), page->GetData());
-            page->SetDirty(false);
+            try {
+                LOG_DEBUG("Flushing page " << page->GetPageId());
+                disk_manager_->WritePage(page->GetPageId(), page->GetData());
+                page->SetDirty(false);
+                flushed_count++;
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to flush page " << page->GetPageId() << ": " << e.what());
+                error_count++;
+            }
         }
     }
+    
+    LOG_INFO("FlushAllPages completed: flushed " << flushed_count 
+             << " pages, " << error_count << " errors");
 }
 
 size_t BufferPoolManager::FindVictimPage() {

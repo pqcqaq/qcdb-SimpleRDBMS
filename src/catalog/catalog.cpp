@@ -32,6 +32,24 @@ Catalog::Catalog(BufferPoolManager* buffer_pool_manager)
     LOG_DEBUG("Catalog: Catalog initialization completed");
 }
 
+Catalog::~Catalog() {
+    // Safely save catalog before destruction if buffer pool is still available
+    if (buffer_pool_manager_) {
+        try {
+            SaveCatalogToDisk();
+        } catch (const std::exception& e) {
+            LOG_WARN(
+                "Catalog::~Catalog: Failed to save catalog during destruction: "
+                << e.what());
+        } catch (...) {
+            LOG_WARN(
+                "Catalog::~Catalog: Unknown error saving catalog during "
+                "destruction");
+        }
+    }
+    LOG_DEBUG("Catalog destructor completed");
+}
+
 bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     LOG_DEBUG("CreateTable: Starting to create table " << table_name);
     // Check if table already exists
@@ -375,13 +393,18 @@ void Catalog::LoadCatalogFromDisk() {
 }
 
 void Catalog::SaveCatalogToDisk() {
-    // 防止并发保存
     std::lock_guard<std::mutex> save_lock(save_mutex_);
-    // 如果正在保存，直接返回
     if (save_in_progress_.load()) {
         LOG_DEBUG("SaveCatalogToDisk: Save already in progress, skipping");
         return;
     }
+    
+    // Check if buffer pool manager is still valid
+    if (!buffer_pool_manager_) {
+        LOG_DEBUG("SaveCatalogToDisk: BufferPoolManager is null, skipping save");
+        return;
+    }
+    
     save_in_progress_.store(true);
 
     try {
@@ -509,7 +532,7 @@ void Catalog::SaveCatalogToDisk() {
     } catch (const std::exception& e) {
         LOG_ERROR("SaveCatalogToDisk: Exception during save: " << e.what());
     }
-
+    
     save_in_progress_.store(false);
 }
 
