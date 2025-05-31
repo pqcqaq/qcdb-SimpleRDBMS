@@ -53,6 +53,9 @@ target_link_libraries(simple_bplus_test simple_rdbms_core)
 add_executable(update_delete_test test/unit/update_delete_test.cpp)
 target_link_libraries(update_delete_test simple_rdbms_core)
 
+add_executable(persistence_recovery_test test/unit/persistence_recovery_test.cpp)
+target_link_libraries(persistence_recovery_test simple_rdbms_core)
+
 add_executable(comprehensive_test test/comprehensive_test.cpp)
 target_link_libraries(comprehensive_test simple_rdbms_core)
 

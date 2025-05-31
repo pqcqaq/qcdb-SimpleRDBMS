@@ -1,6 +1,7 @@
 // src/recovery/recovery_manager.cpp
 #include "recovery/recovery_manager.h"
 #include "recovery/log_record.h"
+#include "record/table_heap.h"
 #include <algorithm>
 
 namespace SimpleRDBMS {

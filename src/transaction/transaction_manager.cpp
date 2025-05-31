@@ -1,5 +1,6 @@
 #include "transaction/transaction_manager.h"
 #include "recovery/log_record.h"
+#include "common/debug.h"
 
 namespace SimpleRDBMS {
 
@@ -26,7 +27,10 @@ TransactionManager::~TransactionManager() {
 }
 
 Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
+    LOG_DEBUG("TransactionManager::Begin: Starting new transaction");
+    
     txn_id_t txn_id = GetNextTxnId();
+    LOG_DEBUG("TransactionManager::Begin: Assigned transaction ID " << txn_id);
     
     // Create new transaction
     auto txn = std::make_unique<Transaction>(txn_id, isolation_level);
@@ -34,14 +38,17 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
     // 简化日志记录，避免可能的卡死
     if (log_manager_ != nullptr) {
         try {
+            LOG_DEBUG("TransactionManager::Begin: Writing begin log record");
             BeginLogRecord log_record(txn_id);
             lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
             txn->SetPrevLSN(lsn);
-        } catch (...) {
+            LOG_DEBUG("TransactionManager::Begin: Begin log record written with LSN " << lsn);
+        } catch (const std::exception& e) {
+            LOG_WARN("TransactionManager::Begin: Failed to write log record: " << e.what());
             // 如果日志失败，继续执行，不影响事务创建
         }
     }
-    
+
     // Add to transaction map
     Transaction* txn_ptr = txn.get();
     {
@@ -49,6 +56,7 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
         txn_map_[txn_id] = std::move(txn);
     }
     
+    LOG_DEBUG("TransactionManager::Begin: Transaction " << txn_id << " created successfully");
     return txn_ptr;
 }
 

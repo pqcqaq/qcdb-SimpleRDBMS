@@ -2,10 +2,13 @@
 
 #include <memory>
 #include <vector>
-#include "catalog/schema.h"
+#include <string>
 #include "common/types.h"
 
+// 前向声明
 namespace SimpleRDBMS {
+class Schema;
+class Expression;
 
 enum class PlanNodeType {
     SEQUENTIAL_SCAN,
@@ -26,15 +29,10 @@ class PlanNode {
 public:
     PlanNode(const Schema* output_schema, std::vector<std::unique_ptr<PlanNode>> children)
         : output_schema_(output_schema), children_(std::move(children)) {}
-    
     virtual ~PlanNode() = default;
-    
     virtual PlanNodeType GetType() const = 0;
-    
     const Schema* GetOutputSchema() const { return output_schema_; }
-    
     const std::vector<std::unique_ptr<PlanNode>>& GetChildren() const { return children_; }
-    
     const PlanNode* GetChild(size_t index) const { 
         return index < children_.size() ? children_[index].get() : nullptr; 
     }
@@ -55,7 +53,6 @@ public:
           predicate_(std::move(predicate)) {}
     
     PlanNodeType GetType() const override { return PlanNodeType::SEQUENTIAL_SCAN; }
-    
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
 
@@ -75,7 +72,6 @@ public:
           values_(std::move(values)) {}
     
     PlanNodeType GetType() const override { return PlanNodeType::INSERT; }
-    
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<std::vector<Value>>& GetValues() const { return values_; }
 
@@ -96,11 +92,16 @@ public:
     }
     
     PlanNodeType GetType() const override { return PlanNodeType::PROJECTION; }
-    
     const std::vector<std::unique_ptr<Expression>>& GetExpressions() const { return expressions_; }
-
+    
+    // 添加方法来设置拥有的schema
+    void SetOwnedSchema(std::unique_ptr<Schema> schema) {
+        owned_schema_ = std::move(schema);
+    }
+    
 private:
     std::vector<std::unique_ptr<Expression>> expressions_;
+    std::unique_ptr<Schema> owned_schema_;  // 拥有schema的生命周期
 };
 
 class UpdatePlanNode : public PlanNode {
@@ -115,7 +116,6 @@ public:
           predicate_(std::move(predicate)) {}
     
     PlanNodeType GetType() const override { return PlanNodeType::UPDATE; }
-    
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& GetUpdates() const { return updates_; }
     Expression* GetPredicate() const { return predicate_.get(); }
@@ -137,7 +137,6 @@ public:
           predicate_(std::move(predicate)) {}
     
     PlanNodeType GetType() const override { return PlanNodeType::DELETE; }
-    
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
 

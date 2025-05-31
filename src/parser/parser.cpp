@@ -328,7 +328,7 @@ std::unique_ptr<Statement> Parser::ParseSelectStatement() {
     Expect(TokenType::SELECT);
     std::vector<std::unique_ptr<Expression>> select_list;
     if (current_token_.type == TokenType::MULTIPLY) {  // 修改这里
-        Advance();  // 消费 * token
+        Advance();                                     // 消费 * token
         select_list.push_back(std::make_unique<ColumnRefExpression>("", "*"));
     } else {
         do {
@@ -371,18 +371,23 @@ std::unique_ptr<Statement> Parser::ParseCreateTableStatement() {
 }
 
 std::unique_ptr<Statement> Parser::ParseInsertStatement() {
+    LOG_DEBUG("ParseInsertStatement: Starting INSERT statement parsing");
+
     Expect(TokenType::INSERT);
     Expect(TokenType::INTO);
 
     if (current_token_.type != TokenType::IDENTIFIER) {
+        LOG_ERROR("ParseInsertStatement: Expected table name");
         throw Exception("Expected table name");
     }
     std::string table_name = current_token_.value;
+    LOG_DEBUG("ParseInsertStatement: Table name: " << table_name);
     Advance();
 
     // Optional column list
     std::vector<std::string> column_names;
     if (Match(TokenType::LPAREN)) {
+        LOG_DEBUG("ParseInsertStatement: Parsing column list");
         do {
             if (current_token_.type != TokenType::IDENTIFIER) {
                 throw Exception("Expected column name");
@@ -390,36 +395,50 @@ std::unique_ptr<Statement> Parser::ParseInsertStatement() {
             column_names.push_back(current_token_.value);
             Advance();
         } while (Match(TokenType::COMMA));
-
         Expect(TokenType::RPAREN);
+        LOG_DEBUG("ParseInsertStatement: Column list parsed, "
+                  << column_names.size() << " columns");
     }
 
     Expect(TokenType::VALUES);
+    LOG_DEBUG("ParseInsertStatement: Parsing VALUES clause");
 
     std::vector<std::vector<Value>> values_list;
 
     // Parse multiple value lists
+    int value_list_count = 0;
     do {
+        LOG_DEBUG("ParseInsertStatement: Parsing value list "
+                  << value_list_count);
         Expect(TokenType::LPAREN);
-
         std::vector<Value> values;
+        int value_count = 0;
         do {
+            LOG_DEBUG("ParseInsertStatement: Parsing value "
+                      << value_count << " in list " << value_list_count);
             auto expr = ParsePrimaryExpression();
-
             // Convert expression to value
             if (auto* const_expr =
                     dynamic_cast<ConstantExpression*>(expr.get())) {
                 values.push_back(const_expr->GetValue());
+                LOG_DEBUG("ParseInsertStatement: Added constant value");
             } else {
+                LOG_ERROR(
+                    "ParseInsertStatement: Only constant values are supported "
+                    "in INSERT");
                 throw Exception("Only constant values are supported in INSERT");
             }
+            value_count++;
         } while (Match(TokenType::COMMA));
-
         Expect(TokenType::RPAREN);
-
+        LOG_DEBUG("ParseInsertStatement: Completed value list "
+                  << value_list_count << " with " << value_count << " values");
         values_list.push_back(std::move(values));
+        value_list_count++;
     } while (Match(TokenType::COMMA));
 
+    LOG_DEBUG("ParseInsertStatement: Completed parsing, " << values_list.size()
+                                                          << " value lists");
     return std::make_unique<InsertStatement>(table_name,
                                              std::move(values_list));
 }
@@ -657,24 +676,31 @@ std::unique_ptr<Expression> Parser::ParseComparisonExpression() {
 
 std::unique_ptr<Expression> Parser::ParseArithmeticExpression() {
     auto left = ParseTermExpression();
-    while (current_token_.type == TokenType::PLUS || current_token_.type == TokenType::MINUS) {
-        BinaryOpExpression::OpType op = (current_token_.type == TokenType::PLUS) ? 
-            BinaryOpExpression::OpType::PLUS : BinaryOpExpression::OpType::MINUS;
+    while (current_token_.type == TokenType::PLUS ||
+           current_token_.type == TokenType::MINUS) {
+        BinaryOpExpression::OpType op = (current_token_.type == TokenType::PLUS)
+                                            ? BinaryOpExpression::OpType::PLUS
+                                            : BinaryOpExpression::OpType::MINUS;
         Advance();
         auto right = ParseTermExpression();
-        left = std::make_unique<BinaryOpExpression>(std::move(left), op, std::move(right));
+        left = std::make_unique<BinaryOpExpression>(std::move(left), op,
+                                                    std::move(right));
     }
     return left;
 }
 
 std::unique_ptr<Expression> Parser::ParseTermExpression() {
     auto left = ParseUnaryExpression();
-    while (current_token_.type == TokenType::MULTIPLY || current_token_.type == TokenType::DIVIDE) {
-        BinaryOpExpression::OpType op = (current_token_.type == TokenType::MULTIPLY) ? 
-            BinaryOpExpression::OpType::MULTIPLY : BinaryOpExpression::OpType::DIVIDE;
+    while (current_token_.type == TokenType::MULTIPLY ||
+           current_token_.type == TokenType::DIVIDE) {
+        BinaryOpExpression::OpType op =
+            (current_token_.type == TokenType::MULTIPLY)
+                ? BinaryOpExpression::OpType::MULTIPLY
+                : BinaryOpExpression::OpType::DIVIDE;
         Advance();
         auto right = ParseUnaryExpression();
-        left = std::make_unique<BinaryOpExpression>(std::move(left), op, std::move(right));
+        left = std::make_unique<BinaryOpExpression>(std::move(left), op,
+                                                    std::move(right));
     }
     return left;
 }

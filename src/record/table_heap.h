@@ -47,20 +47,25 @@ class TablePage : public Page {
 
 class TableHeap {
    public:
+    // 原有构造函数（用于创建新表）
     TableHeap(BufferPoolManager* buffer_pool_manager, const Schema* schema);
+
+    // 新增构造函数（用于从已存在的页面恢复）
+    TableHeap(BufferPoolManager* buffer_pool_manager, const Schema* schema,
+              page_id_t first_page_id);
+
     ~TableHeap();
 
     // Insert a tuple
     bool InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id);
-
     // Delete a tuple
     bool DeleteTuple(const RID& rid, txn_id_t txn_id);
-
     // Update a tuple
     bool UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id);
-
     // Get a tuple
     bool GetTuple(const RID& rid, Tuple* tuple, txn_id_t txn_id);
+
+    page_id_t GetFirstPageId() const { return first_page_id_; }
 
     // Iterator for sequential scan
     class Iterator {

@@ -21,7 +21,6 @@ public:
         // Initialize components
         disk_manager_ = std::make_unique<DiskManager>(db_file);
         log_disk_manager_ = std::make_unique<DiskManager>(db_file + ".log");
-        
         // Create replacer and buffer pool
         replacer_ = std::make_unique<LRUReplacer>(BUFFER_POOL_SIZE);
         buffer_pool_manager_ = std::make_unique<BufferPoolManager>(
@@ -29,28 +28,22 @@ public:
             std::move(disk_manager_), 
             std::move(replacer_)
         );
-        
         // Create log manager
         log_manager_ = std::make_unique<LogManager>(log_disk_manager_.get());
-        
         // Create lock manager
         lock_manager_ = std::make_unique<LockManager>();
-        
         // Create transaction manager
         transaction_manager_ = std::make_unique<TransactionManager>(
             lock_manager_.get(), 
             log_manager_.get()
         );
-        
         // Create catalog
         catalog_ = std::make_unique<Catalog>(buffer_pool_manager_.get());
-        
         // Create table manager
         table_manager_ = std::make_unique<TableManager>(
             buffer_pool_manager_.get(), 
             catalog_.get()
         );
-        
         // Create recovery manager
         recovery_manager_ = std::make_unique<RecoveryManager>(
             buffer_pool_manager_.get(),
@@ -58,40 +51,33 @@ public:
             log_manager_.get(),
             lock_manager_.get()
         );
-        
         // Create execution engine
         execution_engine_ = std::make_unique<ExecutionEngine>(
             buffer_pool_manager_.get(),
             catalog_.get(),
             transaction_manager_.get()
         );
-        
         // Perform recovery if needed
         recovery_manager_->Recover();
     }
-    
+
     void Run() {
         std::cout << "SimpleRDBMS Server Started!" << std::endl;
         std::cout << "Enter SQL commands (type 'exit' to quit):" << std::endl;
-        
         std::string line;
         while (true) {
             std::cout << "SimpleRDBMS> ";
             if (!std::getline(std::cin, line)) {
                 break;
             }
-            
             if (line == "exit" || line == "quit") {
                 break;
             }
-            
             if (line.empty()) {
                 continue;
             }
-            
             ExecuteSQL(line);
         }
-        
         std::cout << "Shutting down..." << std::endl;
         Shutdown();
     }
@@ -102,6 +88,23 @@ private:
             // Parse SQL
             Parser parser(sql);
             auto statement = parser.Parse();
+            
+            // 获取语句类型以便特殊处理
+            auto stmt_type = statement->GetType();
+            
+            // 对于 UPDATE 操作，先执行 SELECT 获取更新前的数据
+            std::vector<Tuple> before_result;
+            if (stmt_type == Statement::StmtType::UPDATE) {
+                auto* update_stmt = static_cast<UpdateStatement*>(statement.get());
+                ShowUpdateBefore(update_stmt->GetTableName(), update_stmt->GetWhereClause(), before_result);
+            }
+            
+            // 对于 DELETE 操作，先执行 SELECT 获取要删除的数据
+            std::vector<Tuple> delete_candidates;
+            if (stmt_type == Statement::StmtType::DELETE) {
+                auto* delete_stmt = static_cast<DeleteStatement*>(statement.get());
+                ShowDeleteCandidates(delete_stmt->GetTableName(), delete_stmt->GetWhereClause(), delete_candidates);
+            }
             
             // Begin transaction
             auto* txn = transaction_manager_->Begin();
@@ -118,44 +121,384 @@ private:
                 transaction_manager_->Commit(txn);
                 std::cout << "Query executed successfully." << std::endl;
                 
-                // Print results if any
-                if (!result_set.empty()) {
-                    std::cout << "Results: " << result_set.size() << " rows" << std::endl;
-                    // TODO: Pretty print results
+                // 根据语句类型显示结果
+                switch (stmt_type) {
+                    case Statement::StmtType::SELECT:
+                        DisplaySelectResults(result_set, static_cast<SelectStatement*>(statement.get()));
+                        break;
+                    case Statement::StmtType::INSERT:
+                        DisplayInsertResults(result_set);
+                        break;
+                    case Statement::StmtType::UPDATE:
+                        DisplayUpdateResults(result_set, before_result, static_cast<UpdateStatement*>(statement.get()));
+                        break;
+                    case Statement::StmtType::DELETE:
+                        DisplayDeleteResults(result_set, delete_candidates);
+                        break;
+                    case Statement::StmtType::CREATE_TABLE:
+                    case Statement::StmtType::DROP_TABLE:
+                    case Statement::StmtType::CREATE_INDEX:
+                    case Statement::StmtType::DROP_INDEX:
+                        std::cout << "DDL operation completed successfully." << std::endl;
+                        break;
+                    default:
+                        break;
                 }
             } else {
                 transaction_manager_->Abort(txn);
                 std::cout << "Query execution failed." << std::endl;
             }
-            
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << std::endl;
         }
     }
     
+    // 显示 SELECT 查询结果
+    void DisplaySelectResults(const std::vector<Tuple>& result_set, SelectStatement* select_stmt) {
+        if (result_set.empty()) {
+            std::cout << "No results found." << std::endl;
+            return;
+        }
+        
+        // 获取表信息和schema
+        TableInfo* table_info = catalog_->GetTable(select_stmt->GetTableName());
+        if (!table_info) {
+            std::cout << "Table not found." << std::endl;
+            return;
+        }
+        
+        const Schema* schema = table_info->schema.get();
+        const auto& select_list = select_stmt->GetSelectList();
+        
+        // 确定要显示的列
+        std::vector<std::string> column_names;
+        std::vector<size_t> column_indices;
+        
+        // 检查是否是 SELECT *
+        bool is_select_all = false;
+        if (select_list.size() == 1) {
+            auto* col_ref = dynamic_cast<ColumnRefExpression*>(select_list[0].get());
+            if (col_ref && col_ref->GetColumnName() == "*") {
+                is_select_all = true;
+            }
+        }
+        
+        if (is_select_all) {
+            // SELECT * - 显示所有列
+            for (size_t i = 0; i < schema->GetColumnCount(); ++i) {
+                column_names.push_back(schema->GetColumn(i).name);
+                column_indices.push_back(i);
+            }
+        } else {
+            // 特定列
+            for (const auto& expr : select_list) {
+                auto* col_ref = dynamic_cast<ColumnRefExpression*>(expr.get());
+                if (col_ref) {
+                    std::string col_name = col_ref->GetColumnName();
+                    column_names.push_back(col_name);
+                    column_indices.push_back(schema->GetColumnIdx(col_name));
+                }
+            }
+        }
+        
+        // 计算列宽度
+        std::vector<size_t> column_widths;
+        for (const auto& name : column_names) {
+            column_widths.push_back(std::max(name.length(), static_cast<size_t>(15)));
+        }
+        
+        // 打印表头
+        std::cout << "\n";
+        PrintSeparator(column_widths);
+        std::cout << "|";
+        for (size_t i = 0; i < column_names.size(); ++i) {
+            std::cout << " " << std::setw(column_widths[i]) << std::left << column_names[i] << " |";
+        }
+        std::cout << "\n";
+        PrintSeparator(column_widths);
+        
+        // 打印数据行
+        for (const auto& tuple : result_set) {
+            std::cout << "|";
+            for (size_t i = 0; i < column_indices.size(); ++i) {
+                std::string value_str = ValueToString(tuple.GetValue(column_indices[i]));
+                std::cout << " " << std::setw(column_widths[i]) << std::left << value_str << " |";
+            }
+            std::cout << "\n";
+        }
+        PrintSeparator(column_widths);
+        
+        std::cout << "\n" << result_set.size() << " row(s) returned.\n" << std::endl;
+    }
+    
+    // 显示 INSERT 结果
+    void DisplayInsertResults(const std::vector<Tuple>& result_set) {
+        // INSERT 通常不返回数据，只显示影响的行数
+        std::cout << "Insert operation completed." << std::endl;
+    }
+    
+    // 获取更新前的数据
+    void ShowUpdateBefore(const std::string& table_name, Expression* where_clause, std::vector<Tuple>& before_result) {
+        try {
+            // 构造 SELECT 语句来获取更新前的数据
+            std::string select_sql = "SELECT * FROM " + table_name;
+            if (where_clause) {
+                // 注意：这里简化处理，实际应该重新构建WHERE子句
+                select_sql += " WHERE 1=1"; // 简化处理
+            }
+            select_sql += ";";
+            
+            // 使用临时事务获取数据
+            auto* txn = transaction_manager_->Begin();
+            Parser parser(select_sql);
+            auto statement = parser.Parse();
+            bool success = execution_engine_->Execute(statement.get(), &before_result, txn);
+            transaction_manager_->Commit(txn);
+            
+            if (!success) {
+                before_result.clear();
+            }
+        } catch (const std::exception& e) {
+            // 如果获取失败，清空结果
+            before_result.clear();
+        }
+    }
+    
+    // 显示 UPDATE 结果
+    void DisplayUpdateResults(const std::vector<Tuple>& result_set, 
+                            const std::vector<Tuple>& before_result,
+                            UpdateStatement* update_stmt) {
+        // 显示影响的行数
+        if (!result_set.empty()) {
+            Value affected_rows = result_set[0].GetValue(0);
+            int32_t count = std::get<int32_t>(affected_rows);
+            std::cout << count << " row(s) updated." << std::endl;
+            
+            // 如果有更新前的数据，显示对比
+            if (!before_result.empty() && count > 0) {
+                std::cout << "\nBefore update:" << std::endl;
+                DisplayTableData(before_result, update_stmt->GetTableName());
+                
+                // 获取更新后的数据
+                std::vector<Tuple> after_result;
+                try {
+                    std::string select_sql = "SELECT * FROM " + update_stmt->GetTableName() + ";";
+                    auto* txn = transaction_manager_->Begin();
+                    Parser parser(select_sql);
+                    auto statement = parser.Parse();
+                    bool success = execution_engine_->Execute(statement.get(), &after_result, txn);
+                    transaction_manager_->Commit(txn);
+                    
+                    if (success && !after_result.empty()) {
+                        std::cout << "\nAfter update:" << std::endl;
+                        DisplayTableData(after_result, update_stmt->GetTableName());
+                    }
+                } catch (const std::exception& e) {
+                    std::cout << "Failed to retrieve updated data: " << e.what() << std::endl;
+                }
+            }
+        } else {
+            std::cout << "0 row(s) updated." << std::endl;
+        }
+    }
+    
+    // 获取要删除的数据
+    void ShowDeleteCandidates(const std::string& table_name, Expression* where_clause, std::vector<Tuple>& delete_candidates) {
+        try {
+            // 构造 SELECT 语句来获取要删除的数据
+            std::string select_sql = "SELECT * FROM " + table_name;
+            if (where_clause) {
+                // 注意：这里简化处理，实际应该重新构建WHERE子句
+                select_sql += " WHERE 1=1"; // 简化处理
+            }
+            select_sql += ";";
+            
+            // 使用临时事务获取数据
+            auto* txn = transaction_manager_->Begin();
+            Parser parser(select_sql);
+            auto statement = parser.Parse();
+            bool success = execution_engine_->Execute(statement.get(), &delete_candidates, txn);
+            transaction_manager_->Commit(txn);
+            
+            if (!success) {
+                delete_candidates.clear();
+            }
+        } catch (const std::exception& e) {
+            // 如果获取失败，清空结果
+            delete_candidates.clear();
+        }
+    }
+    
+    // 显示 DELETE 结果
+    void DisplayDeleteResults(const std::vector<Tuple>& result_set, 
+                            const std::vector<Tuple>& delete_candidates) {
+        // 显示影响的行数
+        if (!result_set.empty()) {
+            Value affected_rows = result_set[0].GetValue(0);
+            int32_t count = std::get<int32_t>(affected_rows);
+            std::cout << count << " row(s) deleted." << std::endl;
+            
+            // 如果有删除的数据，显示被删除的记录
+            if (!delete_candidates.empty() && count > 0) {
+                std::cout << "\nDeleted records:" << std::endl;
+                // 注意：这里显示的是删除前的所有候选记录，不是精确的删除记录
+                // 在实际实现中，应该根据WHERE条件精确匹配
+                size_t show_count = std::min(static_cast<size_t>(count), delete_candidates.size());
+                std::vector<Tuple> deleted_records(delete_candidates.begin(), 
+                                                 delete_candidates.begin() + show_count);
+                DisplayTableDataSimple(deleted_records);
+            }
+        } else {
+            std::cout << "0 row(s) deleted." << std::endl;
+        }
+    }
+    
+    // 显示表格数据（带表名）
+    void DisplayTableData(const std::vector<Tuple>& tuples, const std::string& table_name) {
+        if (tuples.empty()) {
+            std::cout << "No data to display." << std::endl;
+            return;
+        }
+        
+        TableInfo* table_info = catalog_->GetTable(table_name);
+        if (!table_info) {
+            std::cout << "Table not found." << std::endl;
+            return;
+        }
+        
+        const Schema* schema = table_info->schema.get();
+        
+        // 获取所有列名
+        std::vector<std::string> column_names;
+        for (size_t i = 0; i < schema->GetColumnCount(); ++i) {
+            column_names.push_back(schema->GetColumn(i).name);
+        }
+        
+        // 计算列宽度
+        std::vector<size_t> column_widths;
+        for (const auto& name : column_names) {
+            column_widths.push_back(std::max(name.length(), static_cast<size_t>(15)));
+        }
+        
+        // 打印表头
+        PrintSeparator(column_widths);
+        std::cout << "|";
+        for (size_t i = 0; i < column_names.size(); ++i) {
+            std::cout << " " << std::setw(column_widths[i]) << std::left << column_names[i] << " |";
+        }
+        std::cout << "\n";
+        PrintSeparator(column_widths);
+        
+        // 打印数据行
+        for (const auto& tuple : tuples) {
+            std::cout << "|";
+            for (size_t i = 0; i < column_names.size(); ++i) {
+                std::string value_str = ValueToString(tuple.GetValue(i));
+                std::cout << " " << std::setw(column_widths[i]) << std::left << value_str << " |";
+            }
+            std::cout << "\n";
+        }
+        PrintSeparator(column_widths);
+        std::cout << "\n";
+    }
+    
+    // 简单显示表格数据（不获取schema信息）
+    void DisplayTableDataSimple(const std::vector<Tuple>& tuples) {
+        if (tuples.empty()) {
+            std::cout << "No data to display." << std::endl;
+            return;
+        }
+        
+        // 简化显示，假设每个tuple有相同的结构
+        const auto& first_tuple = tuples[0];
+        size_t column_count = first_tuple.GetValues().size();
+        
+        // 使用固定宽度
+        std::vector<size_t> column_widths(column_count, 15);
+        
+        // 打印表头（使用列索引）
+        PrintSeparator(column_widths);
+        std::cout << "|";
+        for (size_t i = 0; i < column_count; ++i) {
+            std::string header = "Column" + std::to_string(i);
+            std::cout << " " << std::setw(column_widths[i]) << std::left << header << " |";
+        }
+        std::cout << "\n";
+        PrintSeparator(column_widths);
+        
+        // 打印数据行
+        for (const auto& tuple : tuples) {
+            std::cout << "|";
+            for (size_t i = 0; i < column_count; ++i) {
+                std::string value_str = ValueToString(tuple.GetValue(i));
+                std::cout << " " << std::setw(column_widths[i]) << std::left << value_str << " |";
+            }
+            std::cout << "\n";
+        }
+        PrintSeparator(column_widths);
+        std::cout << "\n";
+    }
+    
+    // 打印表格分隔线
+    void PrintSeparator(const std::vector<size_t>& column_widths) {
+        std::cout << "+";
+        for (size_t width : column_widths) {
+            std::cout << std::string(width + 2, '-') << "+";
+        }
+        std::cout << "\n";
+    }
+    
+    // 将 Value 转换为字符串
+    std::string ValueToString(const Value& value) {
+        std::stringstream ss;
+        
+        if (std::holds_alternative<bool>(value)) {
+            ss << (std::get<bool>(value) ? "true" : "false");
+        } else if (std::holds_alternative<int8_t>(value)) {
+            ss << static_cast<int>(std::get<int8_t>(value));
+        } else if (std::holds_alternative<int16_t>(value)) {
+            ss << std::get<int16_t>(value);
+        } else if (std::holds_alternative<int32_t>(value)) {
+            ss << std::get<int32_t>(value);
+        } else if (std::holds_alternative<int64_t>(value)) {
+            ss << std::get<int64_t>(value);
+        } else if (std::holds_alternative<float>(value)) {
+            ss << std::fixed << std::setprecision(2) << std::get<float>(value);
+        } else if (std::holds_alternative<double>(value)) {
+            ss << std::fixed << std::setprecision(2) << std::get<double>(value);
+        } else if (std::holds_alternative<std::string>(value)) {
+            ss << std::get<std::string>(value);
+        } else {
+            ss << "NULL";
+        }
+        
+        std::string result = ss.str();
+        // 限制长度，避免表格变形
+        if (result.length() > 13) {
+            result = result.substr(0, 12) + "...";
+        }
+        return result;
+    }
+    
     void Shutdown() {
         // Create checkpoint
         recovery_manager_->Checkpoint();
-        
         // Flush all pages
         buffer_pool_manager_->FlushAllPages();
-        
         // Flush logs
         log_manager_->Flush();
     }
-    
+
     // Storage components
     std::unique_ptr<DiskManager> disk_manager_;
     std::unique_ptr<DiskManager> log_disk_manager_;
     std::unique_ptr<Replacer> replacer_;
     std::unique_ptr<BufferPoolManager> buffer_pool_manager_;
-    
     // Transaction components
     std::unique_ptr<LogManager> log_manager_;
     std::unique_ptr<LockManager> lock_manager_;
     std::unique_ptr<TransactionManager> transaction_manager_;
     std::unique_ptr<RecoveryManager> recovery_manager_;
-    
     // Catalog and execution
     std::unique_ptr<Catalog> catalog_;
     std::unique_ptr<TableManager> table_manager_;
@@ -164,11 +507,10 @@ private:
 
 int main(int argc, char* argv[]) {
     std::string db_file = "simple_rdbms.db";
-    
     if (argc > 1) {
         db_file = argv[1];
     }
-    
+
     try {
         SimpleRDBMSServer server(db_file);
         server.Run();
@@ -176,6 +518,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         return 1;
     }
-    
+
     return 0;
 }

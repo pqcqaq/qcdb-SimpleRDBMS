@@ -64,28 +64,54 @@ void DiskManager::ReadPage(page_id_t page_id, char* page_data) {
 
 void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
     std::lock_guard<std::mutex> lock(latch_);
-
+    
     if (page_id < 0) {
         throw StorageException("Invalid page id: " + std::to_string(page_id));
     }
 
     size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
+    
+    // 确保文件足够大
+    db_file_.seekp(0, std::ios::end);
+    size_t current_size = db_file_.tellp();
+    size_t required_size = offset + PAGE_SIZE;
+    
+    if (current_size < required_size) {
+        // 扩展文件大小
+        db_file_.seekp(required_size - 1);
+        db_file_.write("", 1);
+        LOG_DEBUG("Extended file size to accommodate page " << page_id);
+    }
+    
+    // 写入页面数据
     db_file_.seekp(offset);
     db_file_.write(page_data, PAGE_SIZE);
-
+    
     if (db_file_.bad()) {
-        throw StorageException("Failed to write page: " +
-                               std::to_string(page_id));
+        throw StorageException("Failed to write page: " + std::to_string(page_id));
     }
-
+    
+    // 强制刷新到磁盘
     db_file_.flush();
-
+    
+    // 在支持的系统上调用fsync确保数据写入磁盘
+    #ifdef __unix__
+    int fd = fileno(fopen(db_file_name_.c_str(), "r"));
+    if (fd != -1) {
+        fsync(fd);
+        close(fd);
+    }
+    #endif
+    
+    // 更新元数据
     if (page_id >= num_pages_) {
         num_pages_ = page_id + 1;
         if (next_page_id_ <= page_id) {
             next_page_id_ = page_id + 1;
         }
     }
+    
+    LOG_DEBUG("Successfully wrote page " << page_id << " to disk at offset " << offset);
 }
 
 page_id_t DiskManager::AllocatePage() {
