@@ -54,6 +54,18 @@ bool ExecutionEngine::Execute(Statement* statement,
             auto* drop_idx_stmt = static_cast<DropIndexStatement*>(statement);
             return table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
         }
+        case Statement::StmtType::SHOW_TABLES: {
+            return HandleShowTables(result_set);
+        }
+        case Statement::StmtType::BEGIN_TXN: {
+            return HandleBegin(txn);
+        }
+        case Statement::StmtType::COMMIT_TXN: {
+            return HandleCommit(txn);
+        }
+        case Statement::StmtType::ROLLBACK_TXN: {
+            return HandleRollback(txn);
+        }
         default:
             LOG_DEBUG(
                 "ExecutionEngine::Execute: Handling DML statement, creating "
@@ -226,10 +238,10 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
         LOG_ERROR("CreateSelectPlan: SelectStatement is null");
         return nullptr;
     }
-    
+
     LOG_DEBUG("CreateSelectPlan: Creating plan for table "
               << stmt->GetTableName());
-    
+
     TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
     if (!table_info) {
         LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName()
@@ -277,24 +289,24 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
                 }
             }
         }
-        
+
         // 创建投影schema并将其存储在plan node中
         auto projection_schema = std::make_unique<Schema>(selected_columns);
         const Schema* output_schema = projection_schema.get();
-        
+
         // 创建投影表达式 - 使用克隆避免双重管理
         std::vector<std::unique_ptr<Expression>> expressions;
         for (const auto& expr : select_list) {
             expressions.push_back(ExpressionCloner::Clone(expr.get()));
         }
-        
+
         // 创建投影计划节点，并转移schema的所有权
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
             output_schema, std::move(expressions), std::move(seq_scan_plan));
-        
+
         // 将schema存储在投影计划中（需要修改ProjectionPlanNode）
         projection_plan->SetOwnedSchema(std::move(projection_schema));
-        
+
         return std::move(projection_plan);
     }
 }
@@ -312,6 +324,87 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateInsertPlan(
 
     return std::make_unique<InsertPlanNode>(
         table_info->schema.get(), stmt->GetTableName(), stmt->GetValues());
+}
+
+bool ExecutionEngine::HandleShowTables(std::vector<Tuple>* result_set) {
+    // 创建更详细的结果schema
+    std::vector<Column> columns = {
+        {"table_name", TypeId::VARCHAR, 100, false, false},
+        {"column_name", TypeId::VARCHAR, 100, false, false},
+        {"data_type", TypeId::VARCHAR, 50, false, false},
+        {"is_nullable", TypeId::VARCHAR, 10, false, false},
+        {"is_primary_key", TypeId::VARCHAR, 10, false, false},
+        {"column_size", TypeId::INTEGER, 0, false, false}};
+    Schema result_schema(columns);
+
+    // 清空结果集
+    result_set->clear();
+
+    try {
+        // 从catalog获取所有表名
+        std::vector<std::string> table_names = catalog_->GetAllTableNames();
+
+        // 为每个表的每个字段创建一个Tuple
+        for (const std::string& table_name : table_names) {
+            TableInfo* table_info = catalog_->GetTable(table_name);
+            if (!table_info || !table_info->schema) {
+                continue;
+            }
+
+            const Schema* table_schema = table_info->schema.get();
+
+            // 遍历表的所有列
+            for (size_t i = 0; i < table_schema->GetColumnCount(); ++i) {
+                const Column& col = table_schema->GetColumn(i);
+
+                // 创建包含列信息的Value向量
+                std::vector<Value> values;
+                values.push_back(Value(table_name));  // table_name
+                values.push_back(Value(col.name));    // column_name
+                values.push_back(Value(TypeIdToString(col.type)));  // data_type
+                values.push_back(
+                    Value(col.nullable ? "YES" : "NO"));  // is_nullable
+                values.push_back(Value(
+                    col.is_primary_key ? "YES" : "NO"));  // is_primary_key
+                values.push_back(
+                    Value(static_cast<int32_t>(col.size)));  // column_size
+
+                // 创建Tuple并添加到结果集
+                Tuple tuple(values, &result_schema);
+                result_set->push_back(tuple);
+            }
+        }
+
+        LOG_DEBUG("SHOW TABLES returned " << result_set->size()
+                                          << " columns from "
+                                          << table_names.size() << " tables");
+        return true;
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("Error in HandleShowTables: " << e.what());
+        return false;
+    }
+}
+
+bool ExecutionEngine::HandleBegin(Transaction* txn) {
+    // BEGIN语句通常在main中的ExecuteSQL里处理
+    // 这里可以记录日志或执行其他必要操作
+    LOG_DEBUG("BEGIN transaction executed");
+    return true;
+}
+
+bool ExecutionEngine::HandleCommit(Transaction* txn) {
+    // COMMIT语句通常在main中的ExecuteSQL里处理
+    // 这里可以记录日志或执行其他必要操作
+    LOG_DEBUG("COMMIT transaction executed");
+    return true;
+}
+
+bool ExecutionEngine::HandleRollback(Transaction* txn) {
+    // ROLLBACK语句通常在main中的ExecuteSQL里处理
+    // 这里可以记录日志或执行其他必要操作
+    LOG_DEBUG("ROLLBACK transaction executed");
+    return true;
 }
 
 }  // namespace SimpleRDBMS

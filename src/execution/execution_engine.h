@@ -44,6 +44,35 @@ class ExecutionEngine {
     std::unique_ptr<PlanNode> CreateInsertPlan(InsertStatement* stmt);
     std::unique_ptr<PlanNode> CreateUpdatePlan(UpdateStatement* stmt);
     std::unique_ptr<PlanNode> CreateDeletePlan(DeleteStatement* stmt);
+    bool HandleShowTables(std::vector<Tuple>* result_set);
+    bool HandleBegin(Transaction* txn);
+    bool HandleCommit(Transaction* txn);
+    bool HandleRollback(Transaction* txn);
+
+    std::string TypeIdToString(TypeId type_id) {
+        switch (type_id) {
+            case TypeId::BOOLEAN:
+                return "BOOLEAN";
+            case TypeId::TINYINT:
+                return "TINYINT";
+            case TypeId::SMALLINT:
+                return "SMALLINT";
+            case TypeId::INTEGER:
+                return "INTEGER";
+            case TypeId::BIGINT:
+                return "BIGINT";
+            case TypeId::FLOAT:
+                return "FLOAT";
+            case TypeId::DOUBLE:
+                return "DOUBLE";
+            case TypeId::VARCHAR:
+                return "VARCHAR";
+            case TypeId::TIMESTAMP:
+                return "TIMESTAMP";
+            default:
+                return "UNKNOWN";
+        }
+    }
 };
 
 }  // namespace SimpleRDBMS

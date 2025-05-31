@@ -71,7 +71,7 @@ bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     // 使用已分配并初始化的page_id创建TableHeap
     table_info->table_heap = std::make_unique<TableHeap>(
         buffer_pool_manager_, table_info->schema.get(), first_page_id);
-    
+
     buffer_pool_manager_->UnpinPage(first_page_id, true);
 
     LOG_DEBUG("CreateTable: Adding table to catalog maps");
@@ -624,6 +624,20 @@ void Catalog::DebugPrintTables() const {
                             << table_info->schema->GetColumnCount());
     }
     LOG_DEBUG("=== End Catalog Debug ===");
+}
+
+std::vector<std::string> Catalog::GetAllTableNames() const {
+    std::vector<std::string> table_names;
+    table_names.reserve(tables_.size());
+
+    for (const auto& [name, info] : tables_) {
+        table_names.push_back(name);
+    }
+
+    // 对表名进行排序，使输出更有序
+    std::sort(table_names.begin(), table_names.end());
+
+    return table_names;
 }
 
 }  // namespace SimpleRDBMS

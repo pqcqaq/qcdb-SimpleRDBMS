@@ -1,15 +1,16 @@
 // src/catalog/catalog.h
 #pragma once
 
-#include "common/config.h"
-#include "common/types.h"
-#include "common/debug.h"
-#include <unordered_map>
-#include <memory>
-#include <string>
-#include <vector>
-#include <mutex>
 #include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "common/config.h"
+#include "common/debug.h"
+#include "common/types.h"
 
 // 前向声明
 namespace SimpleRDBMS {
@@ -57,6 +58,8 @@ class Catalog {
 
     // 调试方法：列出所有表（将实现移到 .cpp 文件中）
     void DebugPrintTables() const;
+    // 获取所有表名
+    std::vector<std::string> GetAllTableNames() const;
 
    private:
     BufferPoolManager* buffer_pool_manager_;

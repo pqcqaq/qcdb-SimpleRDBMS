@@ -69,7 +69,11 @@ class Statement : public ASTNode {
         CREATE_TABLE,
         DROP_TABLE,
         CREATE_INDEX,
-        DROP_INDEX
+        DROP_INDEX,
+        SHOW_TABLES,
+        BEGIN_TXN,
+        COMMIT_TXN,
+        ROLLBACK_TXN
     };
 
     virtual StmtType GetType() const = 0;
@@ -196,10 +200,14 @@ class BinaryOpExpression : public Expression {
         GREATER_EQUALS,
         AND,
         OR,
-        PLUS,      // 添加算术运算符
+        PLUS,  // 算术运算符
         MINUS,
         MULTIPLY,
-        DIVIDE
+        DIVIDE,
+        SHOW_TABLES,  // 显示所有表
+        BEGIN_TXN,
+        COMMIT_TXN,
+        ROLLBACK_TXN
     };
 
     BinaryOpExpression(std::unique_ptr<Expression> left, OpType op,
@@ -286,9 +294,40 @@ class UnaryOpExpression : public Expression {
     std::unique_ptr<Expression> operand_;
 };
 
+// SHOW TABLES 语句
+class ShowTablesStatement : public Statement {
+   public:
+    ShowTablesStatement() = default;
+    StmtType GetType() const override { return StmtType::SHOW_TABLES; }
+    void Accept(ASTVisitor* visitor) override;
+};
+
+// BEGIN 语句
+class BeginStatement : public Statement {
+   public:
+    BeginStatement() = default;
+    StmtType GetType() const override { return StmtType::BEGIN_TXN; }
+    void Accept(ASTVisitor* visitor) override;
+};
+
+// COMMIT 语句
+class CommitStatement : public Statement {
+   public:
+    CommitStatement() = default;
+    StmtType GetType() const override { return StmtType::COMMIT_TXN; }
+    void Accept(ASTVisitor* visitor) override;
+};
+
+// ROLLBACK 语句
+class RollbackStatement : public Statement {
+   public:
+    RollbackStatement() = default;
+    StmtType GetType() const override { return StmtType::ROLLBACK_TXN; }
+    void Accept(ASTVisitor* visitor) override;
+};
 // Visitor pattern for AST traversal
 class ASTVisitor {
-public:
+   public:
     virtual ~ASTVisitor() = default;
     virtual void Visit(ConstantExpression* expr) = 0;
     virtual void Visit(ColumnRefExpression* expr) = 0;
@@ -302,6 +341,10 @@ public:
     virtual void Visit(DropTableStatement* stmt) = 0;
     virtual void Visit(CreateIndexStatement* stmt) = 0;
     virtual void Visit(DropIndexStatement* stmt) = 0;
+    virtual void Visit(ShowTablesStatement* stmt) = 0;
+    virtual void Visit(BeginStatement* stmt) = 0;
+    virtual void Visit(CommitStatement* stmt) = 0;
+    virtual void Visit(RollbackStatement* stmt) = 0;
 };
 
 }  // namespace SimpleRDBMS

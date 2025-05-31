@@ -42,6 +42,11 @@ class Parser {
     std::unique_ptr<Statement> ParseDeleteStatement();
     std::unique_ptr<Expression> ParseUnaryExpression();
 
+    std::unique_ptr<Statement> ParseShowTablesStatement();
+    std::unique_ptr<Statement> ParseBeginStatement();
+    std::unique_ptr<Statement> ParseCommitStatement();
+    std::unique_ptr<Statement> ParseRollbackStatement();
+
     // Helper functions
     std::vector<Column> ParseColumnDefinitions();
     TypeId ParseDataType();

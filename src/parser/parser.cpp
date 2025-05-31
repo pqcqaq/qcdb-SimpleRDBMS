@@ -64,7 +64,13 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"AND", TokenType::AND},
     {"OR", TokenType::OR},
     {"TRUE", TokenType::BOOLEAN_LITERAL},
-    {"FALSE", TokenType::BOOLEAN_LITERAL}};
+    {"FALSE", TokenType::BOOLEAN_LITERAL},
+    {"SHOW", TokenType::SHOW},
+    {"TABLES", TokenType::TABLES},
+    {"BEGIN", TokenType::BEGIN},
+    {"COMMIT", TokenType::COMMIT},
+    {"ROLLBACK", TokenType::ROLLBACK},
+};
 
 Lexer::Lexer(const std::string& input)
     : input_(input), position_(0), line_(1), column_(1) {}
@@ -629,6 +635,14 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
             return ParseUpdateStatement();
         case TokenType::DELETE:
             return ParseDeleteStatement();
+        case TokenType::SHOW:
+            return ParseShowTablesStatement();
+        case TokenType::BEGIN:
+            return ParseBeginStatement();
+        case TokenType::COMMIT:
+            return ParseCommitStatement();
+        case TokenType::ROLLBACK:
+            return ParseRollbackStatement();
         default:
             throw Exception("Unsupported statement type");
     }
@@ -767,4 +781,29 @@ std::unique_ptr<Expression> Parser::ParsePrimaryExpression() {
     throw Exception("Expected expression");
 }
 
+std::unique_ptr<Statement> Parser::ParseShowTablesStatement() {
+    Expect(TokenType::SHOW);
+    Expect(TokenType::TABLES);
+    return std::make_unique<ShowTablesStatement>();
+}
+
+std::unique_ptr<Statement> Parser::ParseBeginStatement() {
+    Expect(TokenType::BEGIN);
+    return std::make_unique<BeginStatement>();
+}
+
+std::unique_ptr<Statement> Parser::ParseCommitStatement() {
+    Expect(TokenType::COMMIT);
+    return std::make_unique<CommitStatement>();
+}
+
+std::unique_ptr<Statement> Parser::ParseRollbackStatement() {
+    Expect(TokenType::ROLLBACK);
+    return std::make_unique<RollbackStatement>();
+}
+
+void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
+void BeginStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
+void CommitStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
+void RollbackStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 }  // namespace SimpleRDBMS
