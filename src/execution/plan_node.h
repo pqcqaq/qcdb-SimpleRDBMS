@@ -1,8 +1,9 @@
 #pragma once
 
 #include <memory>
-#include <vector>
 #include <string>
+#include <vector>
+
 #include "common/types.h"
 
 // 前向声明
@@ -26,101 +27,109 @@ enum class PlanNodeType {
 };
 
 class PlanNode {
-public:
-    PlanNode(const Schema* output_schema, std::vector<std::unique_ptr<PlanNode>> children)
+   public:
+    PlanNode(const Schema* output_schema,
+             std::vector<std::unique_ptr<PlanNode>> children)
         : output_schema_(output_schema), children_(std::move(children)) {}
     virtual ~PlanNode() = default;
     virtual PlanNodeType GetType() const = 0;
     const Schema* GetOutputSchema() const { return output_schema_; }
-    const std::vector<std::unique_ptr<PlanNode>>& GetChildren() const { return children_; }
-    const PlanNode* GetChild(size_t index) const { 
-        return index < children_.size() ? children_[index].get() : nullptr; 
+    const std::vector<std::unique_ptr<PlanNode>>& GetChildren() const {
+        return children_;
+    }
+    const PlanNode* GetChild(size_t index) const {
+        return index < children_.size() ? children_[index].get() : nullptr;
     }
 
-protected:
+   protected:
     const Schema* output_schema_;
     std::vector<std::unique_ptr<PlanNode>> children_;
 };
 
 // Sequential scan plan node
 class SeqScanPlanNode : public PlanNode {
-public:
-    SeqScanPlanNode(const Schema* output_schema, 
-                    const std::string& table_name,
+   public:
+    SeqScanPlanNode(const Schema* output_schema, const std::string& table_name,
                     std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           predicate_(std::move(predicate)) {}
-    
-    PlanNodeType GetType() const override { return PlanNodeType::SEQUENTIAL_SCAN; }
+
+    PlanNodeType GetType() const override {
+        return PlanNodeType::SEQUENTIAL_SCAN;
+    }
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
 
-private:
+   private:
     std::string table_name_;
     std::unique_ptr<Expression> predicate_;
 };
 
 // Insert plan node
 class InsertPlanNode : public PlanNode {
-public:
-    InsertPlanNode(const Schema* output_schema,
-                   const std::string& table_name,
+   public:
+    InsertPlanNode(const Schema* output_schema, const std::string& table_name,
                    std::vector<std::vector<Value>> values)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           values_(std::move(values)) {}
-    
+
     PlanNodeType GetType() const override { return PlanNodeType::INSERT; }
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<std::vector<Value>>& GetValues() const { return values_; }
 
-private:
+   private:
     std::string table_name_;
     std::vector<std::vector<Value>> values_;
 };
 
 // Projection plan node
 class ProjectionPlanNode : public PlanNode {
-public:
+   public:
     ProjectionPlanNode(const Schema* output_schema,
                        std::vector<std::unique_ptr<Expression>> expressions,
                        std::unique_ptr<PlanNode> child)
-        : PlanNode(output_schema, {}),
-          expressions_(std::move(expressions)) {
+        : PlanNode(output_schema, {}), expressions_(std::move(expressions)) {
         children_.push_back(std::move(child));
     }
-    
+
     PlanNodeType GetType() const override { return PlanNodeType::PROJECTION; }
-    const std::vector<std::unique_ptr<Expression>>& GetExpressions() const { return expressions_; }
-    
+    const std::vector<std::unique_ptr<Expression>>& GetExpressions() const {
+        return expressions_;
+    }
+
     // 添加方法来设置拥有的schema
     void SetOwnedSchema(std::unique_ptr<Schema> schema) {
         owned_schema_ = std::move(schema);
     }
-    
-private:
+
+   private:
     std::vector<std::unique_ptr<Expression>> expressions_;
     std::unique_ptr<Schema> owned_schema_;  // 拥有schema的生命周期
 };
 
 class UpdatePlanNode : public PlanNode {
-public:
-    UpdatePlanNode(const Schema* output_schema,
-                   const std::string& table_name,
-                   std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates,
-                   std::unique_ptr<Expression> predicate = nullptr)
+   public:
+    UpdatePlanNode(
+        const Schema* output_schema, const std::string& table_name,
+        std::vector<std::pair<std::string, std::unique_ptr<Expression>>>
+            updates,
+        std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           updates_(std::move(updates)),
           predicate_(std::move(predicate)) {}
-    
+
     PlanNodeType GetType() const override { return PlanNodeType::UPDATE; }
     const std::string& GetTableName() const { return table_name_; }
-    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& GetUpdates() const { return updates_; }
+    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>&
+    GetUpdates() const {
+        return updates_;
+    }
     Expression* GetPredicate() const { return predicate_.get(); }
 
-private:
+   private:
     std::string table_name_;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates_;
     std::unique_ptr<Expression> predicate_;
@@ -128,20 +137,41 @@ private:
 
 // Delete plan node
 class DeletePlanNode : public PlanNode {
-public:
-    DeletePlanNode(const Schema* output_schema,
-                   const std::string& table_name,
+   public:
+    DeletePlanNode(const Schema* output_schema, const std::string& table_name,
                    std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           predicate_(std::move(predicate)) {}
-    
+
     PlanNodeType GetType() const override { return PlanNodeType::DELETE; }
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
 
-private:
+   private:
     std::string table_name_;
+    std::unique_ptr<Expression> predicate_;
+};
+
+class IndexScanPlanNode : public PlanNode {
+   public:
+    IndexScanPlanNode(const Schema* output_schema,
+                      const std::string& table_name,
+                      const std::string& index_name,
+                      std::unique_ptr<Expression> predicate = nullptr)
+        : PlanNode(output_schema, {}),
+          table_name_(table_name),
+          index_name_(index_name),
+          predicate_(std::move(predicate)) {}
+
+    PlanNodeType GetType() const override { return PlanNodeType::INDEX_SCAN; }
+    const std::string& GetTableName() const { return table_name_; }
+    const std::string& GetIndexName() const { return index_name_; }
+    Expression* GetPredicate() const { return predicate_.get(); }
+
+   private:
+    std::string table_name_;
+    std::string index_name_;
     std::unique_ptr<Expression> predicate_;
 };
 

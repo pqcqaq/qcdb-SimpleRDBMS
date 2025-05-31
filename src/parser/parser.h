@@ -54,6 +54,8 @@ class Parser {
     std::unique_ptr<Statement> ParseRollbackStatement();
     std::unique_ptr<Statement> ParseExplainStatement();
 
+    std::unique_ptr<Statement> ParseCreateIndexStatement();
+
     // Helper functions
     std::vector<Column> ParseColumnDefinitions();
     TypeId ParseDataType();

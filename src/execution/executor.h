@@ -87,6 +87,26 @@ class SeqScanExecutor : public Executor {
     std::unique_ptr<ExpressionEvaluator> evaluator_;
 };
 
+class IndexScanExecutor : public Executor {
+   public:
+    IndexScanExecutor(ExecutorContext* exec_ctx,
+                      std::unique_ptr<IndexScanPlanNode> plan);
+    void Init() override;
+    bool Next(Tuple* tuple, RID* rid) override;
+    IndexScanPlanNode* GetIndexScanPlan() const {
+        return static_cast<IndexScanPlanNode*>(plan_.get());
+    }
+
+   private:
+    TableInfo* table_info_;
+    IndexInfo* index_info_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
+    Value search_key_;
+    bool has_found_tuple_;
+    RID found_rid_;
+    void ExtractSearchKey(Expression* predicate);
+};
+
 // Insert executor
 class InsertExecutor : public Executor {
    public:

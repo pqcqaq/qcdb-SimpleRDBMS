@@ -225,16 +225,11 @@ std::vector<IndexInfo*> Catalog::GetTableIndexes(
 
 void Catalog::LoadCatalogFromDisk() {
     LOG_DEBUG("LoadCatalogFromDisk: Starting catalog load");
-
-    // 首先检查磁盘是否有页面
     if (buffer_pool_manager_ == nullptr) {
         LOG_ERROR("LoadCatalogFromDisk: BufferPoolManager is null");
         return;
     }
-
     LOG_DEBUG("LoadCatalogFromDisk: Attempting to fetch catalog page 1");
-
-    // 尝试从页面1加载catalog信息
     Page* catalog_page = nullptr;
     try {
         catalog_page = buffer_pool_manager_->FetchPage(1);
@@ -243,47 +238,22 @@ void Catalog::LoadCatalogFromDisk() {
                  << e.what());
         return;
     }
-
     if (catalog_page == nullptr) {
         LOG_DEBUG(
             "LoadCatalogFromDisk: Page 1 does not exist, assuming new "
             "database");
         return;
     }
-
     LOG_DEBUG("LoadCatalogFromDisk: Successfully fetched catalog page 1");
-
     const char* data = catalog_page->GetData();
     size_t offset = 0;
 
-    // 先打印前几个字节进行调试
-    LOG_DEBUG("LoadCatalogFromDisk: First 16 bytes: "
-              << std::hex << static_cast<unsigned>(data[0]) << " "
-              << static_cast<unsigned>(data[1]) << " "
-              << static_cast<unsigned>(data[2]) << " "
-              << static_cast<unsigned>(data[3]) << " "
-              << static_cast<unsigned>(data[4]) << " "
-              << static_cast<unsigned>(data[5]) << " "
-              << static_cast<unsigned>(data[6]) << " "
-              << static_cast<unsigned>(data[7]) << " "
-              << static_cast<unsigned>(data[8]) << " "
-              << static_cast<unsigned>(data[9]) << " "
-              << static_cast<unsigned>(data[10]) << " "
-              << static_cast<unsigned>(data[11]) << " "
-              << static_cast<unsigned>(data[12]) << " "
-              << static_cast<unsigned>(data[13]) << " "
-              << static_cast<unsigned>(data[14]) << " "
-              << static_cast<unsigned>(data[15]) << std::dec);
-
-    // 读取magic number检查
     uint32_t magic_number;
     std::memcpy(&magic_number, data + offset, sizeof(uint32_t));
     offset += sizeof(uint32_t);
-
     LOG_DEBUG("LoadCatalogFromDisk: Read magic number: 0x"
               << std::hex << magic_number << std::dec
               << " (expected: 0x12345678)");
-
     if (magic_number != 0x12345678) {
         LOG_WARN(
             "LoadCatalogFromDisk: Invalid magic number, not a valid catalog "
@@ -294,66 +264,47 @@ void Catalog::LoadCatalogFromDisk() {
 
     LOG_DEBUG(
         "LoadCatalogFromDisk: Valid catalog page found, loading metadata");
-
-    // 读取next_table_oid和next_index_oid
     std::memcpy(&next_table_oid_, data + offset, sizeof(oid_t));
     offset += sizeof(oid_t);
     std::memcpy(&next_index_oid_, data + offset, sizeof(oid_t));
     offset += sizeof(oid_t);
-
     LOG_DEBUG("LoadCatalogFromDisk: Next table OID: "
               << next_table_oid_ << ", Next index OID: " << next_index_oid_);
 
-    // 读取表的数量
     uint32_t table_count;
     std::memcpy(&table_count, data + offset, sizeof(uint32_t));
     offset += sizeof(uint32_t);
-
     LOG_DEBUG("LoadCatalogFromDisk: Loading " << table_count << " tables");
 
-    // 读取每个表的信息
+    // 加载表信息
     for (uint32_t i = 0; i < table_count; ++i) {
         LOG_DEBUG("LoadCatalogFromDisk: Loading table " << i);
-
         auto table_info = std::make_unique<TableInfo>();
-
-        // 检查剩余空间
         if (offset + sizeof(oid_t) + sizeof(page_id_t) + sizeof(uint32_t) >
             PAGE_SIZE) {
             LOG_ERROR("LoadCatalogFromDisk: Not enough data to read table "
                       << i);
             break;
         }
-
-        // 读取table_oid
         std::memcpy(&table_info->table_oid, data + offset, sizeof(oid_t));
         offset += sizeof(oid_t);
-
-        // 读取first_page_id
         std::memcpy(&table_info->first_page_id, data + offset,
                     sizeof(page_id_t));
         offset += sizeof(page_id_t);
-
-        // 读取table_name长度和内容
         uint32_t name_len;
         std::memcpy(&name_len, data + offset, sizeof(uint32_t));
         offset += sizeof(uint32_t);
-
-        if (name_len > 256 || offset + name_len > PAGE_SIZE) {  // 合理性检查
+        if (name_len > 256 || offset + name_len > PAGE_SIZE) {
             LOG_ERROR(
                 "LoadCatalogFromDisk: Invalid table name length: " << name_len);
             break;
         }
-
         table_info->table_name = std::string(data + offset, name_len);
         offset += name_len;
-
         LOG_DEBUG("LoadCatalogFromDisk: Loading table '"
                   << table_info->table_name << "' with OID "
                   << table_info->table_oid << " and first page "
                   << table_info->first_page_id);
-
-        // 读取schema
         try {
             table_info->schema = DeserializeSchema(data, offset);
         } catch (const std::exception& e) {
@@ -362,8 +313,6 @@ void Catalog::LoadCatalogFromDisk() {
                 << table_info->table_name << ": " << e.what());
             break;
         }
-
-        // 使用已存在的first_page_id重建TableHeap
         try {
             table_info->table_heap = std::make_unique<TableHeap>(
                 buffer_pool_manager_, table_info->schema.get(),
@@ -374,22 +323,95 @@ void Catalog::LoadCatalogFromDisk() {
                 << table_info->table_name << ": " << e.what());
             break;
         }
-
-        // 添加到内存结构
         std::string table_name = table_info->table_name;
         oid_t table_oid = table_info->table_oid;
         tables_[table_name] = std::move(table_info);
         table_oid_map_[table_oid] = table_name;
-
         LOG_DEBUG("LoadCatalogFromDisk: Successfully loaded table "
                   << table_name);
     }
 
-    buffer_pool_manager_->UnpinPage(1, false);
+    // 加载索引信息
+    if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
+        uint32_t index_count;
+        std::memcpy(&index_count, data + offset, sizeof(uint32_t));
+        offset += sizeof(uint32_t);
+        LOG_DEBUG("LoadCatalogFromDisk: Loading " << index_count << " indexes");
 
+        for (uint32_t i = 0; i < index_count; ++i) {
+            LOG_DEBUG("LoadCatalogFromDisk: Loading index " << i);
+            auto index_info = std::make_unique<IndexInfo>();
+
+            if (offset + sizeof(oid_t) + sizeof(uint32_t) > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Not enough data to read index "
+                          << i);
+                break;
+            }
+
+            // 读取索引OID
+            std::memcpy(&index_info->index_oid, data + offset, sizeof(oid_t));
+            offset += sizeof(oid_t);
+
+            // 读取索引名称
+            uint32_t index_name_len;
+            std::memcpy(&index_name_len, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            if (index_name_len > 256 || offset + index_name_len > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Invalid index name length: "
+                          << index_name_len);
+                break;
+            }
+            index_info->index_name = std::string(data + offset, index_name_len);
+            offset += index_name_len;
+
+            // 读取表名称
+            uint32_t table_name_len;
+            std::memcpy(&table_name_len, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            if (table_name_len > 256 || offset + table_name_len > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Invalid table name length: "
+                          << table_name_len);
+                break;
+            }
+            index_info->table_name = std::string(data + offset, table_name_len);
+            offset += table_name_len;
+
+            // 读取键列信息
+            uint32_t key_column_count;
+            std::memcpy(&key_column_count, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+
+            for (uint32_t j = 0; j < key_column_count; ++j) {
+                uint32_t column_len;
+                std::memcpy(&column_len, data + offset, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                if (column_len > 256 || offset + column_len > PAGE_SIZE) {
+                    LOG_ERROR(
+                        "LoadCatalogFromDisk: Invalid column name length: "
+                        << column_len);
+                    break;
+                }
+                std::string column_name =
+                    std::string(data + offset, column_len);
+                offset += column_len;
+                index_info->key_columns.push_back(column_name);
+            }
+
+            std::string index_name = index_info->index_name;
+            oid_t index_oid = index_info->index_oid;
+            indexes_[index_name] = std::move(index_info);
+            index_oid_map_[index_oid] = index_name;
+            LOG_DEBUG("LoadCatalogFromDisk: Successfully loaded index "
+                      << index_name);
+        }
+    } else {
+        LOG_DEBUG("LoadCatalogFromDisk: No space left to read indexes");
+    }
+
+    buffer_pool_manager_->UnpinPage(1, false);
     LOG_DEBUG(
         "LoadCatalogFromDisk: Catalog load completed successfully, loaded "
-        << tables_.size() << " tables");
+        << tables_.size() << " tables and " << indexes_.size() << " indexes");
 }
 
 void Catalog::SaveCatalogToDisk() {
@@ -398,19 +420,14 @@ void Catalog::SaveCatalogToDisk() {
         LOG_DEBUG("SaveCatalogToDisk: Save already in progress, skipping");
         return;
     }
-    
-    // Check if buffer pool manager is still valid
     if (!buffer_pool_manager_) {
-        LOG_DEBUG("SaveCatalogToDisk: BufferPoolManager is null, skipping save");
+        LOG_DEBUG(
+            "SaveCatalogToDisk: BufferPoolManager is null, skipping save");
         return;
     }
-    
     save_in_progress_.store(true);
-
     try {
         LOG_DEBUG("SaveCatalogToDisk: Starting catalog save");
-
-        // 获取或创建页面1作为catalog页面
         Page* catalog_page = buffer_pool_manager_->FetchPage(1);
         if (catalog_page == nullptr) {
             LOG_DEBUG(
@@ -431,44 +448,34 @@ void Catalog::SaveCatalogToDisk() {
         } else {
             LOG_DEBUG("SaveCatalogToDisk: Found existing catalog page 1");
         }
-
-        // 确保页面被pin住
         catalog_page->IncreasePinCount();
-
         char* data = catalog_page->GetData();
-        // 先清零整个页面，确保干净的开始
         std::memset(data, 0, PAGE_SIZE);
         size_t offset = 0;
 
         LOG_DEBUG("SaveCatalogToDisk: Writing catalog data");
-
-        // 写入magic number
         uint32_t magic_number = 0x12345678;
         std::memcpy(data + offset, &magic_number, sizeof(uint32_t));
         offset += sizeof(uint32_t);
         LOG_DEBUG("SaveCatalogToDisk: Written magic number 0x"
                   << std::hex << magic_number << std::dec);
 
-        // 写入next_table_oid和next_index_oid
         std::memcpy(data + offset, &next_table_oid_, sizeof(oid_t));
         offset += sizeof(oid_t);
         std::memcpy(data + offset, &next_index_oid_, sizeof(oid_t));
         offset += sizeof(oid_t);
 
-        // 写入表的数量
         uint32_t table_count = static_cast<uint32_t>(tables_.size());
         std::memcpy(data + offset, &table_count, sizeof(uint32_t));
         offset += sizeof(uint32_t);
         LOG_DEBUG("SaveCatalogToDisk: Writing " << table_count << " tables");
 
-        // 写入每个表的信息
+        // 保存表信息
         for (const auto& [table_name, table_info] : tables_) {
             LOG_DEBUG("SaveCatalogToDisk: Writing table " << table_name);
-
-            // 检查缓冲区空间
             size_t required_space = sizeof(oid_t) + sizeof(page_id_t) +
                                     sizeof(uint32_t) + table_name.length() +
-                                    200;  // 额外的schema空间
+                                    200;
             if (offset + required_space > PAGE_SIZE) {
                 LOG_ERROR(
                     "SaveCatalogToDisk: Not enough space in catalog page for "
@@ -476,24 +483,16 @@ void Catalog::SaveCatalogToDisk() {
                     << table_name);
                 break;
             }
-
-            // 写入table_oid
             std::memcpy(data + offset, &table_info->table_oid, sizeof(oid_t));
             offset += sizeof(oid_t);
-
-            // 写入first_page_id
             std::memcpy(data + offset, &table_info->first_page_id,
                         sizeof(page_id_t));
             offset += sizeof(page_id_t);
-
-            // 写入table_name长度和内容
             uint32_t name_len = static_cast<uint32_t>(table_name.length());
             std::memcpy(data + offset, &name_len, sizeof(uint32_t));
             offset += sizeof(uint32_t);
             std::memcpy(data + offset, table_name.c_str(), name_len);
             offset += name_len;
-
-            // 写入schema
             try {
                 SerializeSchema(*table_info->schema, data, offset);
                 LOG_DEBUG(
@@ -508,31 +507,91 @@ void Catalog::SaveCatalogToDisk() {
             }
         }
 
-        LOG_DEBUG("SaveCatalogToDisk: Final offset: " << offset << " bytes");
+        // 保存索引信息
+        uint32_t index_count = static_cast<uint32_t>(indexes_.size());
+        if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
+            std::memcpy(data + offset, &index_count, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            LOG_DEBUG("SaveCatalogToDisk: Writing " << index_count
+                                                    << " indexes");
 
-        // 确保页面被标记为dirty
+            for (const auto& [index_name, index_info] : indexes_) {
+                LOG_DEBUG("SaveCatalogToDisk: Writing index " << index_name);
+                size_t required_space = sizeof(oid_t) + sizeof(uint32_t) +
+                                        index_name.length() + sizeof(uint32_t) +
+                                        index_info->table_name.length() +
+                                        sizeof(uint32_t);
+                for (const auto& column : index_info->key_columns) {
+                    required_space += sizeof(uint32_t) + column.length();
+                }
+
+                if (offset + required_space > PAGE_SIZE) {
+                    LOG_ERROR("SaveCatalogToDisk: Not enough space for index "
+                              << index_name);
+                    break;
+                }
+
+                // 保存索引OID
+                std::memcpy(data + offset, &index_info->index_oid,
+                            sizeof(oid_t));
+                offset += sizeof(oid_t);
+
+                // 保存索引名称
+                uint32_t index_name_len =
+                    static_cast<uint32_t>(index_name.length());
+                std::memcpy(data + offset, &index_name_len, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                std::memcpy(data + offset, index_name.c_str(), index_name_len);
+                offset += index_name_len;
+
+                // 保存表名称
+                uint32_t table_name_len =
+                    static_cast<uint32_t>(index_info->table_name.length());
+                std::memcpy(data + offset, &table_name_len, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                std::memcpy(data + offset, index_info->table_name.c_str(),
+                            table_name_len);
+                offset += table_name_len;
+
+                // 保存键列数量和键列名称
+                uint32_t key_column_count =
+                    static_cast<uint32_t>(index_info->key_columns.size());
+                std::memcpy(data + offset, &key_column_count, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+
+                for (const auto& column : index_info->key_columns) {
+                    uint32_t column_len =
+                        static_cast<uint32_t>(column.length());
+                    std::memcpy(data + offset, &column_len, sizeof(uint32_t));
+                    offset += sizeof(uint32_t);
+                    std::memcpy(data + offset, column.c_str(), column_len);
+                    offset += column_len;
+                }
+
+                LOG_DEBUG("SaveCatalogToDisk: Successfully wrote index "
+                          << index_name);
+            }
+        } else {
+            LOG_WARN("SaveCatalogToDisk: No space left for indexes");
+            uint32_t zero_count = 0;
+            std::memcpy(data + offset, &zero_count, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+        }
+
+        LOG_DEBUG("SaveCatalogToDisk: Final offset: " << offset << " bytes");
         catalog_page->SetDirty(true);
         page_id_t catalog_page_id = catalog_page->GetPageId();
-
-        // 多次unpin以确保正确释放
         while (catalog_page->GetPinCount() > 0) {
             buffer_pool_manager_->UnpinPage(catalog_page_id, true);
         }
-
-        // 立即强制刷新到磁盘
         bool flush_success = buffer_pool_manager_->FlushPage(catalog_page_id);
         LOG_DEBUG("SaveCatalogToDisk: Force flush result: "
                   << (flush_success ? "success" : "failed"));
-
-        // 额外确保：再次强制刷新所有页面
         buffer_pool_manager_->FlushAllPages();
-
         LOG_DEBUG("SaveCatalogToDisk: Catalog save completed successfully");
-
     } catch (const std::exception& e) {
         LOG_ERROR("SaveCatalogToDisk: Exception during save: " << e.what());
     }
-    
     save_in_progress_.store(false);
 }
 

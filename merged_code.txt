@@ -323,6 +323,22 @@ Catalog::Catalog(BufferPoolManager* buffer_pool_manager)
     }
     LOG_DEBUG("Catalog: Catalog initialization completed");
 }
+Catalog::~Catalog() {
+    if (buffer_pool_manager_) {
+        try {
+            SaveCatalogToDisk();
+        } catch (const std::exception& e) {
+            LOG_WARN(
+                "Catalog::~Catalog: Failed to save catalog during destruction: "
+                << e.what());
+        } catch (...) {
+            LOG_WARN(
+                "Catalog::~Catalog: Unknown error saving catalog during "
+                "destruction");
+        }
+    }
+    LOG_DEBUG("Catalog destructor completed");
+}
 bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     LOG_DEBUG("CreateTable: Starting to create table " << table_name);
     if (tables_.find(table_name) != tables_.end()) {
@@ -474,23 +490,6 @@ void Catalog::LoadCatalogFromDisk() {
     LOG_DEBUG("LoadCatalogFromDisk: Successfully fetched catalog page 1");
     const char* data = catalog_page->GetData();
     size_t offset = 0;
-    LOG_DEBUG("LoadCatalogFromDisk: First 16 bytes: "
-              << std::hex << static_cast<unsigned>(data[0]) << " "
-              << static_cast<unsigned>(data[1]) << " "
-              << static_cast<unsigned>(data[2]) << " "
-              << static_cast<unsigned>(data[3]) << " "
-              << static_cast<unsigned>(data[4]) << " "
-              << static_cast<unsigned>(data[5]) << " "
-              << static_cast<unsigned>(data[6]) << " "
-              << static_cast<unsigned>(data[7]) << " "
-              << static_cast<unsigned>(data[8]) << " "
-              << static_cast<unsigned>(data[9]) << " "
-              << static_cast<unsigned>(data[10]) << " "
-              << static_cast<unsigned>(data[11]) << " "
-              << static_cast<unsigned>(data[12]) << " "
-              << static_cast<unsigned>(data[13]) << " "
-              << static_cast<unsigned>(data[14]) << " "
-              << static_cast<unsigned>(data[15]) << std::dec);
     uint32_t magic_number;
     std::memcpy(&magic_number, data + offset, sizeof(uint32_t));
     offset += sizeof(uint32_t);
@@ -569,15 +568,83 @@ void Catalog::LoadCatalogFromDisk() {
         LOG_DEBUG("LoadCatalogFromDisk: Successfully loaded table "
                   << table_name);
     }
+    if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
+        uint32_t index_count;
+        std::memcpy(&index_count, data + offset, sizeof(uint32_t));
+        offset += sizeof(uint32_t);
+        LOG_DEBUG("LoadCatalogFromDisk: Loading " << index_count << " indexes");
+        for (uint32_t i = 0; i < index_count; ++i) {
+            LOG_DEBUG("LoadCatalogFromDisk: Loading index " << i);
+            auto index_info = std::make_unique<IndexInfo>();
+            if (offset + sizeof(oid_t) + sizeof(uint32_t) > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Not enough data to read index "
+                          << i);
+                break;
+            }
+            std::memcpy(&index_info->index_oid, data + offset, sizeof(oid_t));
+            offset += sizeof(oid_t);
+            uint32_t index_name_len;
+            std::memcpy(&index_name_len, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            if (index_name_len > 256 || offset + index_name_len > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Invalid index name length: "
+                          << index_name_len);
+                break;
+            }
+            index_info->index_name = std::string(data + offset, index_name_len);
+            offset += index_name_len;
+            uint32_t table_name_len;
+            std::memcpy(&table_name_len, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            if (table_name_len > 256 || offset + table_name_len > PAGE_SIZE) {
+                LOG_ERROR("LoadCatalogFromDisk: Invalid table name length: "
+                          << table_name_len);
+                break;
+            }
+            index_info->table_name = std::string(data + offset, table_name_len);
+            offset += table_name_len;
+            uint32_t key_column_count;
+            std::memcpy(&key_column_count, data + offset, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            for (uint32_t j = 0; j < key_column_count; ++j) {
+                uint32_t column_len;
+                std::memcpy(&column_len, data + offset, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                if (column_len > 256 || offset + column_len > PAGE_SIZE) {
+                    LOG_ERROR(
+                        "LoadCatalogFromDisk: Invalid column name length: "
+                        << column_len);
+                    break;
+                }
+                std::string column_name =
+                    std::string(data + offset, column_len);
+                offset += column_len;
+                index_info->key_columns.push_back(column_name);
+            }
+            std::string index_name = index_info->index_name;
+            oid_t index_oid = index_info->index_oid;
+            indexes_[index_name] = std::move(index_info);
+            index_oid_map_[index_oid] = index_name;
+            LOG_DEBUG("LoadCatalogFromDisk: Successfully loaded index "
+                      << index_name);
+        }
+    } else {
+        LOG_DEBUG("LoadCatalogFromDisk: No space left to read indexes");
+    }
     buffer_pool_manager_->UnpinPage(1, false);
     LOG_DEBUG(
         "LoadCatalogFromDisk: Catalog load completed successfully, loaded "
-        << tables_.size() << " tables");
+        << tables_.size() << " tables and " << indexes_.size() << " indexes");
 }
 void Catalog::SaveCatalogToDisk() {
     std::lock_guard<std::mutex> save_lock(save_mutex_);
     if (save_in_progress_.load()) {
         LOG_DEBUG("SaveCatalogToDisk: Save already in progress, skipping");
+        return;
+    }
+    if (!buffer_pool_manager_) {
+        LOG_DEBUG(
+            "SaveCatalogToDisk: BufferPoolManager is null, skipping save");
         return;
     }
     save_in_progress_.store(true);
@@ -655,6 +722,63 @@ void Catalog::SaveCatalogToDisk() {
                     << table_name << ": " << e.what());
                 break;
             }
+        }
+        uint32_t index_count = static_cast<uint32_t>(indexes_.size());
+        if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
+            std::memcpy(data + offset, &index_count, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
+            LOG_DEBUG("SaveCatalogToDisk: Writing " << index_count
+                                                    << " indexes");
+            for (const auto& [index_name, index_info] : indexes_) {
+                LOG_DEBUG("SaveCatalogToDisk: Writing index " << index_name);
+                size_t required_space = sizeof(oid_t) + sizeof(uint32_t) +
+                                        index_name.length() + sizeof(uint32_t) +
+                                        index_info->table_name.length() +
+                                        sizeof(uint32_t);
+                for (const auto& column : index_info->key_columns) {
+                    required_space += sizeof(uint32_t) + column.length();
+                }
+                if (offset + required_space > PAGE_SIZE) {
+                    LOG_ERROR("SaveCatalogToDisk: Not enough space for index "
+                              << index_name);
+                    break;
+                }
+                std::memcpy(data + offset, &index_info->index_oid,
+                            sizeof(oid_t));
+                offset += sizeof(oid_t);
+                uint32_t index_name_len =
+                    static_cast<uint32_t>(index_name.length());
+                std::memcpy(data + offset, &index_name_len, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                std::memcpy(data + offset, index_name.c_str(), index_name_len);
+                offset += index_name_len;
+                uint32_t table_name_len =
+                    static_cast<uint32_t>(index_info->table_name.length());
+                std::memcpy(data + offset, &table_name_len, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                std::memcpy(data + offset, index_info->table_name.c_str(),
+                            table_name_len);
+                offset += table_name_len;
+                uint32_t key_column_count =
+                    static_cast<uint32_t>(index_info->key_columns.size());
+                std::memcpy(data + offset, &key_column_count, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+                for (const auto& column : index_info->key_columns) {
+                    uint32_t column_len =
+                        static_cast<uint32_t>(column.length());
+                    std::memcpy(data + offset, &column_len, sizeof(uint32_t));
+                    offset += sizeof(uint32_t);
+                    std::memcpy(data + offset, column.c_str(), column_len);
+                    offset += column_len;
+                }
+                LOG_DEBUG("SaveCatalogToDisk: Successfully wrote index "
+                          << index_name);
+            }
+        } else {
+            LOG_WARN("SaveCatalogToDisk: No space left for indexes");
+            uint32_t zero_count = 0;
+            std::memcpy(data + offset, &zero_count, sizeof(uint32_t));
+            offset += sizeof(uint32_t);
         }
         LOG_DEBUG("SaveCatalogToDisk: Final offset: " << offset << " bytes");
         catalog_page->SetDirty(true);
@@ -831,7 +955,9 @@ namespace SimpleRDBMS {
 TableManager::TableManager(BufferPoolManager* buffer_pool_manager,
                            Catalog* catalog)
     : buffer_pool_manager_(buffer_pool_manager), catalog_(catalog) {
-    index_manager_ = std::make_unique<IndexManager>(buffer_pool_manager, catalog);
+    index_manager_ =
+        std::make_unique<IndexManager>(buffer_pool_manager, catalog);
+    RebuildAllIndexes();
 }
 TableManager::~TableManager() {
     if (index_manager_) {
@@ -839,6 +965,33 @@ TableManager::~TableManager() {
         index_manager_.reset();
     }
     LOG_DEBUG("TableManager::~TableManager: TableManager destroyed");
+}
+void TableManager::RebuildAllIndexes() {
+    LOG_DEBUG("TableManager::RebuildAllIndexes: Starting index rebuild");
+    std::vector<std::string> table_names = catalog_->GetAllTableNames();
+    for (const auto& table_name : table_names) {
+        std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
+        for (auto* index_info : indexes) {
+            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index " << index_info->index_name);
+            TableInfo* table_info = catalog_->GetTable(table_name);
+            if (!table_info) {
+                LOG_ERROR("TableManager::RebuildAllIndexes: Table " << table_name << " not found");
+                continue;
+            }
+            bool success = index_manager_->CreateIndex(
+                index_info->index_name,
+                table_name,
+                index_info->key_columns,
+                table_info->schema.get()
+            );
+            if (!success) {
+                LOG_ERROR("TableManager::RebuildAllIndexes: Failed to rebuild index " << index_info->index_name);
+                continue;
+            }
+            PopulateIndexWithExistingData(index_info->index_name, table_info, index_info->key_columns);
+        }
+    }
+    LOG_DEBUG("TableManager::RebuildAllIndexes: Index rebuild completed");
 }
 bool TableManager::CreateIndex(const std::string& index_name,
                                const std::string& table_name,
@@ -1050,8 +1203,10 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                     << index_name);
                 all_success = false;
             } else {
-                LOG_TRACE("TableManager::UpdateIndexesOnInsert: Successfully inserted "
-                         << "into index " << index_name);
+                LOG_TRACE(
+                    "TableManager::UpdateIndexesOnInsert: Successfully "
+                    "inserted "
+                    << "into index " << index_name);
             }
         } catch (const std::exception& e) {
             LOG_ERROR(
@@ -1104,8 +1259,9 @@ bool TableManager::UpdateIndexesOnDelete(const std::string& table_name,
                     << index_name);
                 all_success = false;
             } else {
-                LOG_TRACE("TableManager::UpdateIndexesOnDelete: Successfully deleted "
-                         << "from index " << index_name);
+                LOG_TRACE(
+                    "TableManager::UpdateIndexesOnDelete: Successfully deleted "
+                    << "from index " << index_name);
             }
         } catch (const std::exception& e) {
             LOG_ERROR(
@@ -1202,48 +1358,94 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
         LOG_ERROR("TableManager::CreateTable: CreateTableStatement is null");
         return false;
     }
-    LOG_DEBUG("TableManager::CreateTable: Creating table " << stmt->GetTableName());
+    LOG_DEBUG("TableManager::CreateTable: Creating table "
+              << stmt->GetTableName());
     const std::string& table_name = stmt->GetTableName();
     const std::vector<Column>& columns = stmt->GetColumns();
     if (columns.empty()) {
-        LOG_ERROR("TableManager::CreateTable: No columns defined for table " << table_name);
+        LOG_ERROR("TableManager::CreateTable: No columns defined for table "
+                  << table_name);
         return false;
     }
     Schema schema(columns);
     bool success = catalog_->CreateTable(table_name, schema);
     if (!success) {
-        LOG_ERROR("TableManager::CreateTable: Failed to create table " << table_name);
+        LOG_ERROR("TableManager::CreateTable: Failed to create table "
+                  << table_name);
         return false;
     }
-    LOG_DEBUG("TableManager::CreateTable: Table " << table_name << " created successfully");
+    LOG_DEBUG("TableManager::CreateTable: Table " << table_name
+                                                  << " created successfully");
     std::string primary_key_column;
     for (const auto& column : columns) {
         if (column.is_primary_key) {
             primary_key_column = column.name;
+            LOG_DEBUG("TableManager::CreateTable: Found primary key column: "
+                      << primary_key_column);
             break;
         }
     }
     if (!primary_key_column.empty()) {
         std::string primary_key_index_name = table_name + "_pk";
         std::vector<std::string> key_columns = {primary_key_column};
-        LOG_DEBUG("TableManager::CreateTable: Creating primary key index " 
-                  << primary_key_index_name << " on column " << primary_key_column);
-        bool catalog_success = catalog_->CreateIndex(primary_key_index_name, table_name, key_columns);
+        LOG_DEBUG("TableManager::CreateTable: Creating primary key index "
+                  << primary_key_index_name << " on column "
+                  << primary_key_column);
+        bool catalog_success = catalog_->CreateIndex(primary_key_index_name,
+                                                     table_name, key_columns);
         if (!catalog_success) {
-            LOG_ERROR("TableManager::CreateTable: Failed to create primary key index in catalog");
+            LOG_ERROR(
+                "TableManager::CreateTable: Failed to create primary key index "
+                "in catalog");
+            catalog_->DropTable(table_name);
             return false;
         }
         TableInfo* table_info = catalog_->GetTable(table_name);
-        bool index_success = index_manager_->CreateIndex(
-            primary_key_index_name, table_name, key_columns, table_info->schema.get());
-        if (!index_success) {
-            LOG_ERROR("TableManager::CreateTable: Failed to create physical primary key index");
-            catalog_->DropIndex(primary_key_index_name);
+        if (!table_info) {
+            LOG_ERROR(
+                "TableManager::CreateTable: Table info not found after "
+                "creation");
+            catalog_->DropTable(table_name);
             return false;
-        } else {
-            LOG_DEBUG("TableManager::CreateTable: Primary key index created successfully");
         }
+        bool index_success =
+            index_manager_->CreateIndex(primary_key_index_name, table_name,
+                                        key_columns, table_info->schema.get());
+        if (!index_success) {
+            LOG_ERROR(
+                "TableManager::CreateTable: Failed to create physical primary "
+                "key index");
+            catalog_->DropIndex(primary_key_index_name);
+            catalog_->DropTable(table_name);
+            return false;
+        }
+        LOG_DEBUG("TableManager::CreateTable: Primary key index "
+                  << primary_key_index_name << " created successfully");
+        auto all_indexes = index_manager_->GetAllIndexNames();
+        bool found_pk_index = false;
+        for (const auto& idx_name : all_indexes) {
+            if (idx_name == primary_key_index_name) {
+                found_pk_index = true;
+                break;
+            }
+        }
+        if (!found_pk_index) {
+            LOG_ERROR(
+                "TableManager::CreateTable: Primary key index not found after "
+                "creation");
+            catalog_->DropTable(table_name);
+            return false;
+        }
+        LOG_DEBUG(
+            "TableManager::CreateTable: Verified primary key index exists");
+    } else {
+        LOG_DEBUG(
+            "TableManager::CreateTable: No primary key column found for table "
+            << table_name);
     }
+    LOG_DEBUG(
+        "TableManager::CreateTable: Successfully completed table creation for "
+        << table_name);
     return true;
 }
 bool TableManager::DropTable(const std::string& table_name) {
@@ -1343,7 +1545,8 @@ bool ExecutionEngine::Execute(Statement* statement,
         return false;
     }
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor context");
-    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_, table_manager_.get());
+    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_,
+                             table_manager_.get());
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor");
     auto executor = CreateExecutor(&exec_ctx, std::move(plan));
     if (!executor) {
@@ -1444,6 +1647,12 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
             return std::make_unique<SeqScanExecutor>(
                 exec_ctx, std::unique_ptr<SeqScanPlanNode>(seq_scan_plan));
         }
+        case PlanNodeType::INDEX_SCAN: {
+            auto index_scan_plan =
+                static_cast<IndexScanPlanNode*>(plan.release());
+            return std::make_unique<IndexScanExecutor>(
+                exec_ctx, std::unique_ptr<IndexScanPlanNode>(index_scan_plan));
+        }
         case PlanNodeType::PROJECTION: {
             auto projection_plan =
                 static_cast<ProjectionPlanNode*>(plan.release());
@@ -1495,14 +1704,27 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
     LOG_DEBUG("CreateSelectPlan: Found table "
               << stmt->GetTableName() << " with schema containing "
               << table_info->schema->GetColumnCount() << " columns");
-    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
-    auto seq_scan_plan = std::make_unique<SeqScanPlanNode>(
-        table_info->schema.get(),
-        stmt->GetTableName(),
-        std::move(where_copy)
-    );
+    std::unique_ptr<PlanNode> scan_plan;
+    if (stmt->GetWhereClause()) {
+        std::string selected_index =
+            SelectBestIndex(stmt->GetTableName(), stmt->GetWhereClause());
+        if (!selected_index.empty()) {
+            LOG_DEBUG("Using index scan with index: " << selected_index);
+            auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+            scan_plan = std::make_unique<IndexScanPlanNode>(
+                table_info->schema.get(), stmt->GetTableName(), selected_index,
+                std::move(where_copy));
+        }
+    }
+    if (!scan_plan) {
+        LOG_DEBUG("Using sequential scan");
+        auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+        scan_plan = std::make_unique<SeqScanPlanNode>(table_info->schema.get(),
+                                                      stmt->GetTableName(),
+                                                      std::move(where_copy));
+    }
     if (is_select_all) {
-        return std::move(seq_scan_plan);
+        return std::move(scan_plan);
     } else {
         std::vector<Column> selected_columns;
         for (const auto& expr : select_list) {
@@ -1526,7 +1748,7 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
             expressions.push_back(ExpressionCloner::Clone(expr.get()));
         }
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
-            output_schema, std::move(expressions), std::move(seq_scan_plan));
+            output_schema, std::move(expressions), std::move(scan_plan));
         projection_plan->SetOwnedSchema(std::move(projection_schema));
         return std::move(projection_plan);
     }
@@ -1542,6 +1764,71 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateInsertPlan(
     }
     return std::make_unique<InsertPlanNode>(
         table_info->schema.get(), stmt->GetTableName(), stmt->GetValues());
+}
+std::string ExecutionEngine::SelectBestIndex(const std::string& table_name,
+                                             Expression* where_clause) {
+    if (!where_clause) {
+        return "";
+    }
+    LOG_DEBUG("SelectBestIndex: Analyzing WHERE clause for table "
+              << table_name);
+    if (auto* binary_expr = dynamic_cast<BinaryOpExpression*>(where_clause)) {
+        if (binary_expr->GetOperator() == BinaryOpExpression::OpType::EQUALS) {
+            std::string column_name;
+            if (auto* col_ref = dynamic_cast<ColumnRefExpression*>(
+                    binary_expr->GetLeft())) {
+                column_name = col_ref->GetColumnName();
+            }
+            else if (auto* col_ref = dynamic_cast<ColumnRefExpression*>(
+                         binary_expr->GetRight())) {
+                column_name = col_ref->GetColumnName();
+            }
+            if (!column_name.empty()) {
+                bool has_constant = false;
+                if (dynamic_cast<ConstantExpression*>(binary_expr->GetLeft()) ||
+                    dynamic_cast<ConstantExpression*>(
+                        binary_expr->GetRight())) {
+                    has_constant = true;
+                }
+                if (has_constant) {
+                    LOG_DEBUG(
+                        "SelectBestIndex: Found equality condition on column: "
+                        << column_name);
+                    std::vector<IndexInfo*> indexes =
+                        catalog_->GetTableIndexes(table_name);
+                    for (auto* index_info : indexes) {
+                        if (index_info->key_columns.size() == 1 &&
+                            index_info->key_columns[0] == column_name) {
+                            LOG_DEBUG("SelectBestIndex: Found suitable index: "
+                                      << index_info->index_name);
+                            return index_info->index_name;
+                        }
+                    }
+                    LOG_DEBUG("SelectBestIndex: No index found for column: "
+                              << column_name);
+                }
+            }
+        }
+        else {
+            LOG_DEBUG("SelectBestIndex: Unsupported operator for index usage");
+        }
+    }
+    else if (auto* and_expr = dynamic_cast<BinaryOpExpression*>(where_clause)) {
+        if (and_expr->GetOperator() == BinaryOpExpression::OpType::AND) {
+            std::string left_index =
+                SelectBestIndex(table_name, and_expr->GetLeft());
+            if (!left_index.empty()) {
+                return left_index;
+            }
+            std::string right_index =
+                SelectBestIndex(table_name, and_expr->GetRight());
+            if (!right_index.empty()) {
+                return right_index;
+            }
+        }
+    }
+    LOG_DEBUG("SelectBestIndex: No suitable index found for the WHERE clause");
+    return "";
 }
 bool ExecutionEngine::HandleShowTables(std::vector<Tuple>* result_set) {
     std::vector<Column> columns = {
@@ -1631,6 +1918,15 @@ std::string ExecutionEngine::FormatExecutionPlan(PlanNode* plan, int indent) {
             oss << " on " << seq_scan->GetTableName();
             if (seq_scan->GetPredicate()) {
                 oss << " (Filter: WHERE clause)";
+            }
+            break;
+        }
+        case PlanNodeType::INDEX_SCAN: {
+            auto* index_scan = static_cast<IndexScanPlanNode*>(plan);
+            oss << " using " << index_scan->GetIndexName() << " on "
+                << index_scan->GetTableName();
+            if (index_scan->GetPredicate()) {
+                oss << " (Index Cond: WHERE clause)";
             }
             break;
         }
@@ -1753,6 +2049,54 @@ bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
     LOG_DEBUG("SeqScanExecutor::Next: iterator is at end");
     return false;
 }
+IndexScanExecutor::IndexScanExecutor(ExecutorContext* exec_ctx,
+                                     std::unique_ptr<IndexScanPlanNode> plan)
+    : Executor(exec_ctx, std::move(plan)),
+      table_info_(nullptr),
+      index_info_(nullptr),
+      has_found_tuple_(false) {}
+void IndexScanExecutor::Init() {
+    auto* index_scan_plan = GetIndexScanPlan();
+    table_info_ = exec_ctx_->GetCatalog()->GetTable(index_scan_plan->GetTableName());
+    if (table_info_ == nullptr) {
+        throw ExecutionException("Table not found: " + index_scan_plan->GetTableName());
+    }
+    index_info_ = exec_ctx_->GetCatalog()->GetIndex(index_scan_plan->GetIndexName());
+    if (index_info_ == nullptr) {
+        throw ExecutionException("Index not found: " + index_scan_plan->GetIndexName());
+    }
+    evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+    has_found_tuple_ = false;
+    ExtractSearchKey(index_scan_plan->GetPredicate());
+}
+bool IndexScanExecutor::Next(Tuple* tuple, RID* rid) {
+    if (has_found_tuple_) {
+        return false;
+    }
+    auto* index_scan_plan = GetIndexScanPlan();
+    TableManager* table_manager = exec_ctx_->GetTableManager();
+    IndexManager* index_manager = table_manager->GetIndexManager();
+    RID found_rid;
+    bool found = index_manager->FindEntry(index_scan_plan->GetIndexName(), search_key_, &found_rid);
+    if (found) {
+        bool success = table_info_->table_heap->GetTuple(found_rid, tuple, exec_ctx_->GetTransaction()->GetTxnId());
+        if (success) {
+            *rid = found_rid;
+            has_found_tuple_ = true;
+            return true;
+        }
+    }
+    return false;
+}
+void IndexScanExecutor::ExtractSearchKey(Expression* predicate) {
+    if (auto* binary_expr = dynamic_cast<BinaryOpExpression*>(predicate)) {
+        if (binary_expr->GetOperator() == BinaryOpExpression::OpType::EQUALS) {
+            if (auto* const_expr = dynamic_cast<ConstantExpression*>(binary_expr->GetRight())) {
+                search_key_ = const_expr->GetValue();
+            }
+        }
+    }
+}
 InsertExecutor::InsertExecutor(ExecutorContext* exec_ctx,
                                std::unique_ptr<InsertPlanNode> plan)
     : Executor(exec_ctx, std::move(plan)),
@@ -1781,18 +2125,12 @@ bool InsertExecutor::Next(Tuple* tuple, RID* rid) {
     if (!success) {
         throw ExecutionException("Failed to insert tuple");
     }
-    auto* catalog = exec_ctx_->GetCatalog();
-    auto indexes = catalog->GetTableIndexes(table_info_->table_name);
-    for (auto* index_info : indexes) {
-        if (index_info->key_columns.size() != 1) {
-            continue;
-        }
-        try {
-            const std::string& column_name = index_info->key_columns[0];
-            size_t column_idx = table_info_->schema->GetColumnIdx(column_name);
-            Value key_value = insert_tuple.GetValue(column_idx);
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception updating index " << index_info->index_name << ": " << e.what());
+    TableManager* table_manager = exec_ctx_->GetTableManager();
+    if (table_manager) {
+        bool index_success = table_manager->UpdateIndexesOnInsert(
+            table_info_->table_name, insert_tuple, *rid);
+        if (!index_success) {
+            LOG_WARN("Failed to update indexes for insert operation");
         }
     }
     current_index_++;
@@ -2288,8 +2626,11 @@ bool ExpressionEvaluator::IsValueTrue(const Value& value) {
 ========== ./src/index/b_plus_tree.cpp ==========
 namespace SimpleRDBMS {
 template <typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>::BPlusTree(const std::string& name, BufferPoolManager* buffer_pool_manager)
-    : index_name_(name), buffer_pool_manager_(buffer_pool_manager), root_page_id_(INVALID_PAGE_ID) {
+BPlusTree<KeyType, ValueType>::BPlusTree(const std::string& name,
+                                         BufferPoolManager* buffer_pool_manager)
+    : index_name_(name),
+      buffer_pool_manager_(buffer_pool_manager),
+      root_page_id_(INVALID_PAGE_ID) {
     LoadRootPageId();
 }
 template <typename KeyType, typename ValueType>
@@ -2298,7 +2639,10 @@ BPlusTree<KeyType, ValueType>::~BPlusTree() {
         std::lock_guard<std::mutex> lock(latch_);
         root_page_id_ = INVALID_PAGE_ID;
         LOG_DEBUG("BPlusTree destroyed: " << index_name_);
+    } catch (const std::exception& e) {
+        LOG_ERROR("BPlusTree destructor exception: " << e.what());
     } catch (...) {
+        LOG_ERROR("BPlusTree destructor unknown exception");
     }
 }
 template <typename KeyType, typename ValueType>
@@ -2307,7 +2651,8 @@ void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
     int num_pages = buffer_pool_manager_->GetDiskManager()->GetNumPages();
     LOG_DEBUG("Disk has " << num_pages << " pages");
     if (num_pages == 0) {
-        LOG_DEBUG("New database with no pages, setting root_page_id to INVALID");
+        LOG_DEBUG(
+            "New database with no pages, setting root_page_id to INVALID");
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
@@ -2322,23 +2667,28 @@ void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
     LOG_DEBUG("Loaded root page ID: " << root_page_id_ << " from header page");
     if (root_page_id_ != INVALID_PAGE_ID) {
         if (root_page_id_ >= num_pages) {
-            LOG_WARN("Root page " << root_page_id_ << " is out of range (num_pages=" 
-                     << num_pages << "), resetting to INVALID");
+            LOG_WARN("Root page " << root_page_id_
+                                  << " is out of range (num_pages=" << num_pages
+                                  << "), resetting to INVALID");
             root_page_id_ = INVALID_PAGE_ID;
             UpdateRootPageId(root_page_id_);
             return;
         }
         Page* root_page = buffer_pool_manager_->FetchPage(root_page_id_);
         if (root_page == nullptr) {
-            LOG_WARN("Root page " << root_page_id_ << " does not exist, resetting to INVALID");
+            LOG_WARN("Root page " << root_page_id_
+                                  << " does not exist, resetting to INVALID");
             root_page_id_ = INVALID_PAGE_ID;
             UpdateRootPageId(root_page_id_);
         } else {
-            auto tree_page = reinterpret_cast<BPlusTreePage*>(root_page->GetData());
+            auto tree_page =
+                reinterpret_cast<BPlusTreePage*>(root_page->GetData());
             if (tree_page->GetPageId() != root_page_id_) {
-                LOG_WARN("Root page " << root_page_id_ << " has inconsistent page_id (expected " 
-                         << root_page_id_ << ", got " << tree_page->GetPageId() 
-                         << "), resetting to INVALID");
+                LOG_WARN("Root page " << root_page_id_
+                                      << " has inconsistent page_id (expected "
+                                      << root_page_id_ << ", got "
+                                      << tree_page->GetPageId()
+                                      << "), resetting to INVALID");
                 root_page_id_ = INVALID_PAGE_ID;
                 UpdateRootPageId(root_page_id_);
             }
@@ -2347,9 +2697,11 @@ void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
     }
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& value, txn_id_t txn_id) {
+bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
+                                           const ValueType& value,
+                                           txn_id_t txn_id) {
     std::lock_guard<std::mutex> lock(latch_);
-    (void) txn_id;
+    (void)txn_id;
     LOG_TRACE("Inserting key: " << key);
     if (root_page_id_ == INVALID_PAGE_ID) {
         LOG_DEBUG("Creating root page for first insertion");
@@ -2363,7 +2715,8 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& 
             }
             LOG_DEBUG("Created header page with ID: " << header_page_id);
             std::memset(header_page->GetData(), 0, PAGE_SIZE);
-            *reinterpret_cast<page_id_t*>(header_page->GetData()) = INVALID_PAGE_ID;
+            *reinterpret_cast<page_id_t*>(header_page->GetData()) =
+                INVALID_PAGE_ID;
             header_page->SetDirty(true);
             buffer_pool_manager_->UnpinPage(header_page_id, true);
         } else {
@@ -2376,7 +2729,8 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& 
             return false;
         }
         LOG_DEBUG("Allocated root page with ID: " << new_page_id);
-        auto root = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(root_page->GetData());
+        auto root = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+            root_page->GetData());
         LOG_DEBUG("Initializing root page...");
         root->Init(new_page_id);
         LOG_DEBUG("Inserting key " << key << " into root page...");
@@ -2402,7 +2756,8 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& 
         LOG_ERROR("Failed to find leaf page for key: " << key);
         return false;
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(leaf_page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        leaf_page->GetData());
     page_id_t leaf_page_id = leaf_page->GetPageId();
     bool result = InsertIntoLeaf(key, value, leaf);
     if (result) {
@@ -2417,9 +2772,10 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& 
     return result;
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::Remove(const KeyType& key, txn_id_t txn_id) {
+bool BPlusTree<KeyType, ValueType>::Remove(const KeyType& key,
+                                           txn_id_t txn_id) {
     std::lock_guard<std::mutex> lock(latch_);
-    (void) txn_id;
+    (void)txn_id;
     if (root_page_id_ == INVALID_PAGE_ID) {
         LOG_DEBUG("Tree is empty, cannot remove key: " << key);
         return false;
@@ -2430,7 +2786,8 @@ bool BPlusTree<KeyType, ValueType>::Remove(const KeyType& key, txn_id_t txn_id) 
         LOG_DEBUG("Failed to find leaf page for key: " << key);
         return false;
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(leaf_page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        leaf_page->GetData());
     page_id_t leaf_page_id = leaf_page->GetPageId();
     bool result = leaf->Delete(key);
     if (result) {
@@ -2451,9 +2808,11 @@ bool BPlusTree<KeyType, ValueType>::Remove(const KeyType& key, txn_id_t txn_id) 
     return result;
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::GetValue(const KeyType& key, ValueType* value, txn_id_t txn_id) {
+bool BPlusTree<KeyType, ValueType>::GetValue(const KeyType& key,
+                                             ValueType* value,
+                                             txn_id_t txn_id) {
     std::lock_guard<std::mutex> lock(latch_);
-    (void) txn_id;
+    (void)txn_id;
     if (root_page_id_ == INVALID_PAGE_ID) {
         return false;
     }
@@ -2461,7 +2820,8 @@ bool BPlusTree<KeyType, ValueType>::GetValue(const KeyType& key, ValueType* valu
     if (leaf_page == nullptr) {
         return false;
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(leaf_page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        leaf_page->GetData());
     int index = leaf->KeyIndex(key);
     bool found = (index < leaf->GetSize() && leaf->KeyAt(index) == key);
     if (found) {
@@ -2471,7 +2831,8 @@ bool BPlusTree<KeyType, ValueType>::GetValue(const KeyType& key, ValueType* valu
     return found;
 }
 template <typename KeyType, typename ValueType>
-typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::Begin() {
+typename BPlusTree<KeyType, ValueType>::Iterator
+BPlusTree<KeyType, ValueType>::Begin() {
     std::lock_guard<std::mutex> lock(latch_);
     if (root_page_id_ == INVALID_PAGE_ID) {
         return End();
@@ -2484,7 +2845,9 @@ typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::
         }
         auto tree_page = reinterpret_cast<BPlusTreePage*>(page->GetData());
         if (tree_page->IsLeafPage()) {
-            auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(page->GetData());
+            auto leaf =
+                reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+                    page->GetData());
             if (leaf->GetSize() == 0) {
                 buffer_pool_manager_->UnpinPage(current_page_id, false);
                 return End();
@@ -2492,14 +2855,16 @@ typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::
             buffer_pool_manager_->UnpinPage(current_page_id, false);
             return Iterator(this, current_page_id, 0);
         }
-        auto internal = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(page->GetData());
+        auto internal =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(page->GetData());
         page_id_t next_page_id = internal->ValueAt(0);
         buffer_pool_manager_->UnpinPage(current_page_id, false);
         current_page_id = next_page_id;
     }
 }
 template <typename KeyType, typename ValueType>
-typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::Begin(const KeyType& key) {
+typename BPlusTree<KeyType, ValueType>::Iterator
+BPlusTree<KeyType, ValueType>::Begin(const KeyType& key) {
     std::lock_guard<std::mutex> lock(latch_);
     if (root_page_id_ == INVALID_PAGE_ID) {
         return End();
@@ -2508,19 +2873,22 @@ typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::
     if (leaf_page == nullptr) {
         return End();
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(leaf_page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        leaf_page->GetData());
     int index = leaf->KeyIndex(key);
     page_id_t page_id = leaf_page->GetPageId();
     buffer_pool_manager_->UnpinPage(page_id, false);
     return Iterator(this, page_id, index);
 }
 template <typename KeyType, typename ValueType>
-typename BPlusTree<KeyType, ValueType>::Iterator BPlusTree<KeyType, ValueType>::End() {
+typename BPlusTree<KeyType, ValueType>::Iterator
+BPlusTree<KeyType, ValueType>::End() {
     return Iterator(this, INVALID_PAGE_ID, 0);
 }
 template <typename KeyType, typename ValueType>
-Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key, bool is_write_op) {
-    (void) is_write_op;
+Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
+                                                  bool is_write_op) {
+    (void)is_write_op;
     if (root_page_id_ == INVALID_PAGE_ID) {
         LOG_DEBUG("Tree is empty, root_page_id is invalid");
         return nullptr;
@@ -2535,13 +2903,18 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key, bool is_wr
         LOG_TRACE("FindLeafPage: fetching page " << current_page_id);
         current_page = buffer_pool_manager_->FetchPage(current_page_id);
         if (current_page == nullptr) {
-            LOG_ERROR("Failed to fetch page: " << current_page_id 
-                      << " (num_pages=" << buffer_pool_manager_->GetDiskManager()->GetNumPages() << ")");
+            LOG_ERROR("Failed to fetch page: "
+                      << current_page_id << " (num_pages="
+                      << buffer_pool_manager_->GetDiskManager()->GetNumPages()
+                      << ")");
             return nullptr;
         }
-        auto tree_page = reinterpret_cast<BPlusTreePage*>(current_page->GetData());
+        auto tree_page =
+            reinterpret_cast<BPlusTreePage*>(current_page->GetData());
         if (tree_page->GetPageId() != current_page_id) {
-            LOG_ERROR("Page " << current_page_id << " has inconsistent page_id: " << tree_page->GetPageId());
+            LOG_ERROR("Page " << current_page_id
+                              << " has inconsistent page_id: "
+                              << tree_page->GetPageId());
             buffer_pool_manager_->UnpinPage(current_page_id, false);
             return nullptr;
         }
@@ -2549,18 +2922,22 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key, bool is_wr
             LOG_TRACE("Found leaf page: " << current_page_id);
             return current_page;
         }
-        auto internal = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(current_page->GetData());
+        auto internal = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+            current_page->GetData());
         int index = internal->KeyIndex(key);
         if (index < 0) {
             LOG_ERROR("Invalid index returned by KeyIndex: " << index);
             index = 0;
         }
         if (index > internal->GetSize()) {
-            LOG_ERROR("Index too large: " << index << ", size: " << internal->GetSize());
+            LOG_ERROR("Index too large: " << index
+                                          << ", size: " << internal->GetSize());
             index = internal->GetSize();
         }
         page_id_t next_page_id = internal->ValueAt(index);
-        LOG_TRACE("Traversing from page " << current_page_id << " to page " << next_page_id << " at index " << index);
+        LOG_TRACE("Traversing from page " << current_page_id << " to page "
+                                          << next_page_id << " at index "
+                                          << index);
         if (next_page_id == INVALID_PAGE_ID) {
             LOG_ERROR("Invalid next page ID in internal page");
             buffer_pool_manager_->UnpinPage(current_page_id, false);
@@ -2570,8 +2947,9 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key, bool is_wr
     }
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(const KeyType& key, const ValueType& value, 
-                                                    BPlusTreeLeafPage<KeyType, ValueType>* leaf) {
+bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(
+    const KeyType& key, const ValueType& value,
+    BPlusTreeLeafPage<KeyType, ValueType>* leaf) {
     int index = leaf->KeyIndex(key);
     if (index < leaf->GetSize() && leaf->KeyAt(index) == key) {
         leaf->SetValueAt(index, value);
@@ -2580,14 +2958,16 @@ bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(const KeyType& key, const Val
     if (leaf->GetSize() < leaf->GetMaxSize()) {
         return leaf->Insert(key, value);
     }
-    LOG_DEBUG("Leaf page is full, need to split. Size: " << leaf->GetSize() << ", MaxSize: " << leaf->GetMaxSize());
+    LOG_DEBUG("Leaf page is full, need to split. Size: "
+              << leaf->GetSize() << ", MaxSize: " << leaf->GetMaxSize());
     page_id_t new_page_id;
     Page* new_page = buffer_pool_manager_->NewPage(&new_page_id);
     if (new_page == nullptr) {
         LOG_ERROR("Failed to allocate new page for split");
         return false;
     }
-    auto new_leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(new_page->GetData());
+    auto new_leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        new_page->GetData());
     new_leaf->Init(new_page_id, leaf->GetParentPageId());
     const int total_entries = leaf->GetSize() + 1;
     std::vector<std::pair<KeyType, ValueType>> temp_entries;
@@ -2638,12 +3018,14 @@ bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(const KeyType& key, const Val
 template <typename KeyType, typename ValueType>
 template <typename N>
 bool BPlusTree<KeyType, ValueType>::Split(N* node) {
-    LOG_ERROR("Split function called - this should be handled by InsertIntoLeaf");
+    LOG_ERROR(
+        "Split function called - this should be handled by InsertIntoLeaf");
     return false;
 }
 template <typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, const KeyType& key, 
-                                                      BPlusTreePage* new_node) {
+void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
+                                                     const KeyType& key,
+                                                     BPlusTreePage* new_node) {
     if (old_node->IsRootPage()) {
         page_id_t new_root_id;
         Page* new_root_page = buffer_pool_manager_->NewPage(&new_root_id);
@@ -2651,7 +3033,8 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, co
             LOG_ERROR("Failed to create new root page");
             return;
         }
-        auto new_root = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(new_root_page->GetData());
+        auto new_root = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+            new_root_page->GetData());
         new_root->Init(new_root_id);
         new_root->SetValueAt(0, old_node->GetPageId());
         new_root->SetKeyAt(1, key);
@@ -2667,15 +3050,18 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, co
         LOG_DEBUG("Created new root page: " << new_root_id);
         return;
     }
-    Page* parent_page = buffer_pool_manager_->FetchPage(old_node->GetParentPageId());
+    Page* parent_page =
+        buffer_pool_manager_->FetchPage(old_node->GetParentPageId());
     if (parent_page == nullptr) {
         LOG_ERROR("Failed to fetch parent page");
         return;
     }
-    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(parent_page->GetData());
+    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+        parent_page->GetData());
     page_id_t parent_page_id = parent_page->GetPageId();
     if (parent->GetSize() < parent->GetMaxSize()) {
-        parent->InsertNodeAfter(old_node->GetPageId(), key, new_node->GetPageId());
+        parent->InsertNodeAfter(old_node->GetPageId(), key,
+                                new_node->GetPageId());
         new_node->SetParentPageId(parent->GetPageId());
         parent_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page_id, true);
@@ -2683,15 +3069,20 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, co
         LOG_DEBUG("Inserted into parent page successfully");
     } else {
         try {
-            parent->InsertNodeAfter(old_node->GetPageId(), key, new_node->GetPageId());
+            parent->InsertNodeAfter(old_node->GetPageId(), key,
+                                    new_node->GetPageId());
             new_node->SetParentPageId(parent->GetPageId());
             if (parent->GetSize() > parent->GetMaxSize()) {
                 LOG_DEBUG("Parent page needs splitting after insertion");
                 page_id_t new_parent_page_id;
-                Page* new_parent_page = buffer_pool_manager_->NewPage(&new_parent_page_id);
+                Page* new_parent_page =
+                    buffer_pool_manager_->NewPage(&new_parent_page_id);
                 if (new_parent_page != nullptr) {
-                    auto new_parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(new_parent_page->GetData());
-                    new_parent->Init(new_parent_page_id, parent->GetParentPageId());
+                    auto new_parent =
+                        reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+                            new_parent_page->GetData());
+                    new_parent->Init(new_parent_page_id,
+                                     parent->GetParentPageId());
                     parent->MoveHalfTo(new_parent, buffer_pool_manager_);
                     KeyType middle_key_to_promote;
                     if (new_parent->GetSize() > 0) {
@@ -2700,11 +3091,13 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, co
                             new_parent->SetKeyAt(i, new_parent->KeyAt(i + 1));
                         }
                         new_parent->IncreaseSize(-1);
-                        InsertIntoParent(parent, middle_key_to_promote, new_parent);
+                        InsertIntoParent(parent, middle_key_to_promote,
+                                         new_parent);
                     }
                     new_parent_page->SetDirty(true);
                     buffer_pool_manager_->UnpinPage(new_parent_page_id, true);
-                    buffer_pool_manager_->FlushPage(new_parent_page_id);
+                    buffer_pool_manager_->FlushPage(
+                        new_parent_page_id);
                 }
             }
         } catch (const std::exception& e) {
@@ -2716,22 +3109,26 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node, co
     }
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::ShouldCoalesceOrRedistribute(BPlusTreePage* node) {
+bool BPlusTree<KeyType, ValueType>::ShouldCoalesceOrRedistribute(
+    BPlusTreePage* node) {
     if (node->IsRootPage()) {
         return node->GetSize() == 0;
     }
     return node->GetSize() < (node->GetMaxSize() + 1) / 2;
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::CoalesceOrRedistribute(BPlusTreePage* node, txn_id_t txn_id) {
+bool BPlusTree<KeyType, ValueType>::CoalesceOrRedistribute(BPlusTreePage* node,
+                                                           txn_id_t txn_id) {
     if (node->IsRootPage()) {
         return AdjustRoot(node);
     }
-    Page* parent_page = buffer_pool_manager_->FetchPage(node->GetParentPageId());
+    Page* parent_page =
+        buffer_pool_manager_->FetchPage(node->GetParentPageId());
     if (parent_page == nullptr) {
         return false;
     }
-    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(parent_page->GetData());
+    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+        parent_page->GetData());
     int node_index = parent->ValueIndex(node->GetPageId());
     if (node_index == -1) {
         buffer_pool_manager_->UnpinPage(parent_page->GetPageId(), false);
@@ -2752,7 +3149,9 @@ bool BPlusTree<KeyType, ValueType>::CoalesceOrRedistribute(BPlusTreePage* node, 
     bool node_deleted = false;
     if (node->GetSize() + sibling->GetSize() < node->GetMaxSize()) {
         bool is_predecessor = sibling_index < node_index;
-        node_deleted = Coalesce(&sibling, &node, &parent, is_predecessor ? sibling_index + 1 : node_index, txn_id);
+        node_deleted =
+            Coalesce(&sibling, &node, &parent,
+                     is_predecessor ? sibling_index + 1 : node_index, txn_id);
         parent_page->SetDirty(true);
         sibling_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page->GetPageId(), true);
@@ -2772,12 +3171,14 @@ bool BPlusTree<KeyType, ValueType>::AdjustRoot(BPlusTreePage* old_root_node) {
         return false;
     }
     if (!old_root_node->IsLeafPage()) {
-        auto root = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(old_root_node);
+        auto root =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(old_root_node);
         page_id_t new_root_id = root->ValueAt(0);
         if (new_root_id != INVALID_PAGE_ID) {
             Page* new_root_page = buffer_pool_manager_->FetchPage(new_root_id);
             if (new_root_page != nullptr) {
-                auto new_root = reinterpret_cast<BPlusTreePage*>(new_root_page->GetData());
+                auto new_root =
+                    reinterpret_cast<BPlusTreePage*>(new_root_page->GetData());
                 new_root->SetParentPageId(INVALID_PAGE_ID);
                 new_root_page->SetDirty(true);
                 buffer_pool_manager_->UnpinPage(new_root_id, true);
@@ -2794,9 +3195,9 @@ bool BPlusTree<KeyType, ValueType>::AdjustRoot(BPlusTreePage* old_root_node) {
 }
 template <typename KeyType, typename ValueType>
 template <typename N>
-bool BPlusTree<KeyType, ValueType>::Coalesce(N** neighbor_node, N** node,
-                                             BPlusTreeInternalPage<KeyType>** parent, 
-                                             int index, txn_id_t txn_id) {
+bool BPlusTree<KeyType, ValueType>::Coalesce(
+    N** neighbor_node, N** node, BPlusTreeInternalPage<KeyType>** parent,
+    int index, txn_id_t txn_id) {
     auto neighbor = *neighbor_node;
     auto n = *node;
     auto p = *parent;
@@ -2806,16 +3207,22 @@ bool BPlusTree<KeyType, ValueType>::Coalesce(N** neighbor_node, N** node,
     }
     page_id_t node_page_id = n->GetPageId();
     KeyType middle_key = p->KeyAt(index);
-    LOG_DEBUG("Coalescing: merging page " << node_page_id << " into its neighbor");
+    LOG_DEBUG("Coalescing: merging page " << node_page_id
+                                          << " into its neighbor");
     if (n->IsLeafPage()) {
-        auto leaf_neighbor = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(neighbor);
-        auto leaf_node = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(n);
+        auto leaf_neighbor =
+            reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(neighbor);
+        auto leaf_node =
+            reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(n);
         leaf_node->MoveAllTo(leaf_neighbor);
         leaf_neighbor->SetNextPageId(leaf_node->GetNextPageId());
     } else {
-        auto internal_neighbor = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(neighbor);
-        auto internal_node = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(n);
-        internal_node->MoveAllTo(internal_neighbor, middle_key, buffer_pool_manager_);
+        auto internal_neighbor =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(neighbor);
+        auto internal_node =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(n);
+        internal_node->MoveAllTo(internal_neighbor, middle_key,
+                                 buffer_pool_manager_);
     }
     p->Remove(index);
     if (ShouldCoalesceOrRedistribute(p)) {
@@ -2824,21 +3231,27 @@ bool BPlusTree<KeyType, ValueType>::Coalesce(N** neighbor_node, N** node,
     LOG_DEBUG("Deleting merged page " << node_page_id);
     bool delete_success = buffer_pool_manager_->DeletePage(node_page_id);
     if (!delete_success) {
-        LOG_ERROR("Failed to delete page " << node_page_id << " during coalesce operation");
+        LOG_ERROR("Failed to delete page " << node_page_id
+                                           << " during coalesce operation");
     }
     return true;
 }
 template <typename KeyType, typename ValueType>
 template <typename N>
-void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node, int index) {
+void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node,
+                                                 int index) {
     auto parent_page = buffer_pool_manager_->FetchPage(node->GetParentPageId());
     if (parent_page == nullptr) {
         return;
     }
-    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(parent_page->GetData());
+    auto parent = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
+        parent_page->GetData());
     if (node->IsLeafPage()) {
-        auto leaf_node = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(node);
-        auto leaf_neighbor = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(neighbor_node);
+        auto leaf_node =
+            reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(node);
+        auto leaf_neighbor =
+            reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+                neighbor_node);
         if (index == 0) {
             leaf_neighbor->MoveFirstToEndOf(leaf_node);
             parent->SetKeyAt(1, leaf_neighbor->KeyAt(0));
@@ -2847,15 +3260,19 @@ void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node, int 
             parent->SetKeyAt(index, leaf_node->KeyAt(0));
         }
     } else {
-        auto internal_node = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(node);
-        auto internal_neighbor = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(neighbor_node);
+        auto internal_node =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(node);
+        auto internal_neighbor =
+            reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(neighbor_node);
         if (index == 0) {
             KeyType middle_key = parent->KeyAt(1);
-            internal_neighbor->MoveFirstToEndOf(internal_node, middle_key, buffer_pool_manager_);
+            internal_neighbor->MoveFirstToEndOf(internal_node, middle_key,
+                                                buffer_pool_manager_);
             parent->SetKeyAt(1, internal_neighbor->KeyAt(1));
         } else {
             KeyType middle_key = parent->KeyAt(index);
-            internal_neighbor->MoveLastToFrontOf(internal_node, middle_key, buffer_pool_manager_);
+            internal_neighbor->MoveLastToFrontOf(internal_node, middle_key,
+                                                 buffer_pool_manager_);
             parent->SetKeyAt(index, internal_node->KeyAt(1));
         }
     }
@@ -2874,24 +3291,28 @@ void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
             return;
         }
         if (header_page_id != 0) {
-            LOG_WARN("Allocated header page has ID " << header_page_id << " instead of 0");
+            LOG_WARN("Allocated header page has ID " << header_page_id
+                                                     << " instead of 0");
         }
         std::memset(header_page->GetData(), 0, PAGE_SIZE);
     }
     *reinterpret_cast<page_id_t*>(header_page->GetData()) = root_page_id;
     header_page->SetDirty(true);
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
-    LOG_DEBUG("Updated header page " << header_page->GetPageId() << " with root page ID: " << root_page_id);
+    LOG_DEBUG("Updated header page " << header_page->GetPageId()
+                                     << " with root page ID: " << root_page_id);
 }
 template <typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>::Iterator::Iterator(BPlusTree* tree, page_id_t page_id, int index)
+BPlusTree<KeyType, ValueType>::Iterator::Iterator(BPlusTree* tree,
+                                                  page_id_t page_id, int index)
     : tree_(tree), current_page_id_(page_id), current_index_(index) {}
 template <typename KeyType, typename ValueType>
 bool BPlusTree<KeyType, ValueType>::Iterator::IsEnd() const {
     return current_page_id_ == INVALID_PAGE_ID;
 }
 template <typename KeyType, typename ValueType>
-std::pair<KeyType, ValueType> BPlusTree<KeyType, ValueType>::Iterator::operator*() {
+std::pair<KeyType, ValueType>
+BPlusTree<KeyType, ValueType>::Iterator::operator*() {
     if (IsEnd()) {
         throw std::runtime_error("Iterator is at end");
     }
@@ -2899,7 +3320,8 @@ std::pair<KeyType, ValueType> BPlusTree<KeyType, ValueType>::Iterator::operator*
     if (page == nullptr) {
         throw std::runtime_error("Failed to fetch page");
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        page->GetData());
     if (current_index_ >= leaf->GetSize() || current_index_ < 0) {
         tree_->buffer_pool_manager_->UnpinPage(current_page_id_, false);
         throw std::runtime_error("Iterator index out of range");
@@ -2919,7 +3341,8 @@ void BPlusTree<KeyType, ValueType>::Iterator::operator++() {
         current_page_id_ = INVALID_PAGE_ID;
         return;
     }
-    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(page->GetData());
+    auto leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+        page->GetData());
     current_index_++;
     if (current_index_ >= leaf->GetSize()) {
         page_id_t next_page_id = leaf->GetNextPageId();
@@ -2930,11 +3353,14 @@ void BPlusTree<KeyType, ValueType>::Iterator::operator++() {
         } else {
             current_page_id_ = next_page_id;
             current_index_ = 0;
-            Page* next_page = tree_->buffer_pool_manager_->FetchPage(next_page_id);
+            Page* next_page =
+                tree_->buffer_pool_manager_->FetchPage(next_page_id);
             if (next_page == nullptr) {
                 current_page_id_ = INVALID_PAGE_ID;
             } else {
-                auto next_leaf = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(next_page->GetData());
+                auto next_leaf =
+                    reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+                        next_page->GetData());
                 if (next_leaf->GetSize() == 0) {
                     current_page_id_ = INVALID_PAGE_ID;
                 }
@@ -3438,8 +3864,9 @@ class IndexManagerImpl {
                      const std::vector<std::string>& key_columns,
                      const Schema* table_schema) {
         std::lock_guard<std::mutex> lock(latch_);
-        LOG_DEBUG("IndexManager: Creating index " << index_name << " on table "
-                                                  << table_name);
+        LOG_DEBUG("IndexManager: Creating index "
+                  << index_name << " on table " << table_name
+                  << " (currently have " << indexes_.size() << " indexes)");
         if (indexes_.find(index_name) != indexes_.end()) {
             LOG_WARN("IndexManager: Index " << index_name << " already exists");
             return false;
@@ -3548,7 +3975,13 @@ class IndexManagerImpl {
         }
         if (success) {
             indexes_[index_name] = std::move(metadata);
-            LOG_INFO("IndexManager: Successfully created index " << index_name);
+            LOG_INFO("IndexManager: Successfully created index "
+                     << index_name << " (now have " << indexes_.size()
+                     << " indexes)");
+            LOG_DEBUG("IndexManager: Current indexes after creation:");
+            for (const auto& [name, meta] : indexes_) {
+                LOG_DEBUG("  - " << name << " on table " << meta->table_name);
+            }
             return true;
         } else {
             LOG_ERROR("IndexManager: Failed to create index " << index_name);
@@ -3557,14 +3990,22 @@ class IndexManagerImpl {
     }
     bool DropIndex(const std::string& index_name) {
         std::lock_guard<std::mutex> lock(latch_);
-        LOG_DEBUG("IndexManager: Dropping index " << index_name);
+        LOG_DEBUG("IndexManager: Dropping index "
+                  << index_name << " (currently have " << indexes_.size()
+                  << " indexes)");
         auto it = indexes_.find(index_name);
         if (it == indexes_.end()) {
             LOG_WARN("IndexManager: Index " << index_name << " not found");
             return false;
         }
         indexes_.erase(it);
-        LOG_INFO("IndexManager: Successfully dropped index " << index_name);
+        LOG_INFO("IndexManager: Successfully dropped index "
+                 << index_name << " (now have " << indexes_.size()
+                 << " indexes)");
+        LOG_DEBUG("IndexManager: Remaining indexes after drop:");
+        for (const auto& [name, meta] : indexes_) {
+            LOG_DEBUG("  - " << name << " on table " << meta->table_name);
+        }
         return true;
     }
     template <typename KeyType>
@@ -3778,12 +4219,15 @@ class IndexManagerImpl {
         std::lock_guard<std::mutex> lock(latch_);
         std::vector<std::string> names;
         names.reserve(indexes_.size());
+        LOG_DEBUG("IndexManager::GetAllIndexNames: Scanning " << indexes_.size()
+                                                              << " indexes");
         for (const auto& [name, metadata] : indexes_) {
             names.push_back(name);
-            LOG_DEBUG("IndexManager::GetAllIndexNames: Found index " << name);
+            LOG_DEBUG("IndexManager::GetAllIndexNames: Found index "
+                      << name << " on table " << metadata->table_name);
         }
-        LOG_DEBUG("IndexManager::GetAllIndexNames: Total " << names.size()
-                                                           << " indexes");
+        LOG_DEBUG("IndexManager::GetAllIndexNames: Total "
+                  << names.size() << " indexes returned");
         return names;
     }
     std::vector<std::string> GetTableIndexes(
@@ -4726,7 +5170,6 @@ std::unique_ptr<Statement> Parser::ParseSelectStatement() {
                                              std::move(where_clause));
 }
 std::unique_ptr<Statement> Parser::ParseCreateTableStatement() {
-    Expect(TokenType::CREATE);
     Expect(TokenType::TABLE);
     if (current_token_.type != TokenType::IDENTIFIER) {
         throw Exception("Expected table name");
@@ -4942,8 +5385,16 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
     switch (current_token_.type) {
         case TokenType::SELECT:
             return ParseSelectStatement();
-        case TokenType::CREATE:
-            return ParseCreateTableStatement();
+        case TokenType::CREATE: {
+            Advance();
+            if (current_token_.type == TokenType::TABLE) {
+                return ParseCreateTableStatement();
+            } else if (current_token_.type == TokenType::INDEX) {
+                return ParseCreateIndexStatement();
+            } else {
+                throw Exception("Expected TABLE or INDEX after CREATE");
+            }
+        }
         case TokenType::INSERT:
             return ParseInsertStatement();
         case TokenType::UPDATE:
@@ -5113,6 +5564,31 @@ std::unique_ptr<Statement> Parser::ParseExplainStatement() {
     }
     return std::make_unique<ExplainStatement>(std::move(stmt));
 }
+std::unique_ptr<Statement> Parser::ParseCreateIndexStatement() {
+    Expect(TokenType::INDEX);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected index name");
+    }
+    std::string index_name = current_token_.value;
+    Advance();
+    Expect(TokenType::ON);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected table name");
+    }
+    std::string table_name = current_token_.value;
+    Advance();
+    Expect(TokenType::LPAREN);
+    std::vector<std::string> key_columns;
+    do {
+        if (current_token_.type != TokenType::IDENTIFIER) {
+            throw Exception("Expected column name");
+        }
+        key_columns.push_back(current_token_.value);
+        Advance();
+    } while (Match(TokenType::COMMA));
+    Expect(TokenType::RPAREN);
+    return std::make_unique<CreateIndexStatement>(index_name, table_name, key_columns);
+}
 void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void BeginStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void CommitStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
@@ -5142,9 +5618,11 @@ void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
               << " num_tuples=" << header->num_tuples
               << " available_space=" << (PAGE_SIZE - sizeof(TablePageHeader)));
     if (header->free_space_offset != PAGE_SIZE || header->num_tuples != 0) {
-        LOG_ERROR("TablePage::Init: Initialization verification failed: "
+        LOG_ERROR("TablePage::Init: Initialization verification failed on page " << page_id << ": "
                   << "free_space_offset=" << header->free_space_offset 
                   << " num_tuples=" << header->num_tuples);
+        header->free_space_offset = PAGE_SIZE;
+        header->num_tuples = 0;
     }
 }
 bool TablePage::DeleteTuple(const RID& rid) {
@@ -5210,25 +5688,23 @@ bool TablePage::GetTuple(const RID& rid, Tuple* tuple, const Schema* schema) {
 }
 bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     auto* header = GetHeader();
-    if (header->num_tuples < 0) {
-        LOG_ERROR("TablePage::GetNextTupleRID: Invalid num_tuples (negative): " 
-                  << header->num_tuples);
-        return false;
-    }
-    if (header->num_tuples == 0) {
-        LOG_DEBUG("TablePage::GetNextTupleRID: page has no tuples");
-        return false;
-    }
     const size_t page_header_size = sizeof(TablePageHeader);
     const size_t min_record_size = 16;
     const size_t slot_size = sizeof(Slot);
     const int max_reasonable_tuples = static_cast<int>(
         (PAGE_SIZE - page_header_size) / (min_record_size + slot_size));
+    if (header->num_tuples < 0) {
+        LOG_ERROR("TablePage::GetNextTupleRID: Invalid num_tuples (negative): " 
+                  << header->num_tuples << " on page " << GetPageId());
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
     if (header->num_tuples > max_reasonable_tuples) {
         LOG_ERROR("TablePage::GetNextTupleRID: num_tuples ("
                   << header->num_tuples << ") exceeds reasonable limit ("
-                  << max_reasonable_tuples << "), possible corruption. "
-                  << "Attempting to reset page.");
+                  << max_reasonable_tuples << ") on page " << GetPageId() 
+                  << ", resetting page.");
         header->num_tuples = 0;
         header->free_space_offset = PAGE_SIZE;
         return false;
@@ -5236,8 +5712,15 @@ bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     if (header->free_space_offset > PAGE_SIZE ||
         header->free_space_offset < sizeof(TablePageHeader)) {
         LOG_ERROR("TablePage::GetNextTupleRID: invalid free_space_offset="
-                  << header->free_space_offset << " (should be between "
-                  << sizeof(TablePageHeader) << " and " << PAGE_SIZE << ")");
+                  << header->free_space_offset << " on page " << GetPageId()
+                  << " (should be between " << sizeof(TablePageHeader) 
+                  << " and " << PAGE_SIZE << "), resetting page.");
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
+    if (header->num_tuples == 0) {
+        LOG_DEBUG("TablePage::GetNextTupleRID: page " << GetPageId() << " has no tuples");
         return false;
     }
     Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
@@ -5247,7 +5730,8 @@ bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     }
     LOG_DEBUG("TablePage::GetNextTupleRID: searching from slot "
               << start_slot << ", total slots: " << header->num_tuples
-              << ", free_space_offset: " << header->free_space_offset);
+              << ", free_space_offset: " << header->free_space_offset
+              << " on page " << GetPageId());
     for (int i = start_slot; i < header->num_tuples; i++) {
         if (slots[i].size > 0 && slots[i].size <= PAGE_SIZE &&
             slots[i].offset >= header->free_space_offset &&
@@ -5257,16 +5741,16 @@ bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
             next_rid->slot_num = i;
             LOG_DEBUG("TablePage::GetNextTupleRID: found valid tuple at slot "
                       << i << " offset=" << slots[i].offset
-                      << " size=" << slots[i].size);
+                      << " size=" << slots[i].size << " on page " << GetPageId());
             return true;
         } else if (slots[i].size > 0) {
             LOG_WARN("TablePage::GetNextTupleRID: invalid slot "
                      << i << " size=" << slots[i].size
                      << " offset=" << slots[i].offset << " (free_space_offset="
-                     << header->free_space_offset << ")");
+                     << header->free_space_offset << ") on page " << GetPageId());
         }
     }
-    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found");
+    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found on page " << GetPageId());
     return false;
 }
 page_id_t TablePage::GetNextPageId() const { return GetHeader()->next_page_id; }
@@ -5373,16 +5857,22 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
               << " current_tuples=" << header->num_tuples
               << " free_space_offset=" << header->free_space_offset);
     if (tuple_size == 0 || tuple_size > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size);
+        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size << " on page " << GetPageId());
+        return false;
+    }
+    if (header->num_tuples < 0 || header->num_tuples > (PAGE_SIZE / 8)) {
+        LOG_ERROR("TablePage::InsertTuple: corrupted num_tuples=" << header->num_tuples << " on page " << GetPageId());
+        return false;
+    }
+    if (header->free_space_offset < sizeof(TablePageHeader) || header->free_space_offset > PAGE_SIZE) {
+        LOG_ERROR("TablePage::InsertTuple: corrupted free_space_offset=" << header->free_space_offset << " on page " << GetPageId());
         return false;
     }
     size_t required_space = tuple_size + slot_size;
     size_t slot_end_offset = sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
-    if (header->free_space_offset < slot_end_offset ||
-        header->free_space_offset > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid free_space_offset="
-                  << header->free_space_offset
-                  << " slot_end_offset=" << slot_end_offset);
+    if (header->free_space_offset < slot_end_offset) {
+        LOG_ERROR("TablePage::InsertTuple: free_space_offset=" << header->free_space_offset
+                  << " < slot_end_offset=" << slot_end_offset << " on page " << GetPageId());
         return false;
     }
     size_t free_space = header->free_space_offset - slot_end_offset;
@@ -5392,7 +5882,8 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
                  << " (tuple_size=" << tuple_size << ", slot_size=" << slot_size
                  << ", num_tuples=" << header->num_tuples
                  << ", slot_end_offset=" << slot_end_offset 
-                 << ", free_space_offset=" << header->free_space_offset << ")");
+                 << ", free_space_offset=" << header->free_space_offset 
+                 << ") on page " << GetPageId());
         return false;
     }
     header->free_space_offset -= tuple_size;
@@ -5405,7 +5896,7 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
     rid->slot_num = header->num_tuples;
     LOG_DEBUG("TablePage::InsertTuple: inserted at slot "
               << header->num_tuples << " offset=" << header->free_space_offset
-              << " size=" << tuple_size);
+              << " size=" << tuple_size << " on page " << GetPageId());
     header->num_tuples++;
     return true;
 }
@@ -6729,6 +7220,7 @@ struct IndexInfo {
 class Catalog {
    public:
     explicit Catalog(BufferPoolManager* buffer_pool_manager);
+    ~Catalog();
     bool CreateTable(const std::string& table_name, const Schema& schema);
     bool DropTable(const std::string& table_name);
     TableInfo* GetTable(const std::string& table_name);
@@ -6744,6 +7236,15 @@ class Catalog {
     void SaveCatalogToDisk();
     void DebugPrintTables() const;
     std::vector<std::string> GetAllTableNames() const;
+    void Shutdown() {
+        try {
+            SaveCatalogToDisk();
+            buffer_pool_manager_ =
+                nullptr;
+        } catch (const std::exception& e) {
+            LOG_WARN("Catalog::Shutdown: " << e.what());
+        }
+    }
    private:
     BufferPoolManager* buffer_pool_manager_;
     mutable std::mutex save_mutex_;
@@ -6787,7 +7288,7 @@ class IndexManager;
 class TableInfo;
 class Tuple;
 class TableManager {
-public:
+   public:
     TableManager(BufferPoolManager* buffer_pool_manager, Catalog* catalog);
     ~TableManager();
     TableManager(const TableManager&) = delete;
@@ -6812,8 +7313,8 @@ public:
      * @return 创建是否成功
      */
     bool CreateIndex(const std::string& index_name,
-                    const std::string& table_name,
-                    const std::vector<std::string>& key_columns);
+                     const std::string& table_name,
+                     const std::vector<std::string>& key_columns);
     /**
      * 删除索引
      * @param index_name 索引名称
@@ -6827,17 +7328,16 @@ public:
      * @param rid 记录标识符
      * @return 更新是否成功
      */
-    bool UpdateIndexesOnInsert(const std::string& table_name, 
-                              const Tuple& tuple, 
-                              const RID& rid);
+    bool UpdateIndexesOnInsert(const std::string& table_name,
+                               const Tuple& tuple, const RID& rid);
     /**
      * 在删除记录时更新相关索引
      * @param table_name 表名
      * @param tuple 被删除的记录
      * @return 更新是否成功
      */
-    bool UpdateIndexesOnDelete(const std::string& table_name, 
-                              const Tuple& tuple);
+    bool UpdateIndexesOnDelete(const std::string& table_name,
+                               const Tuple& tuple);
     /**
      * 在更新记录时更新相关索引
      * @param table_name 表名
@@ -6847,9 +7347,8 @@ public:
      * @return 更新是否成功
      */
     bool UpdateIndexesOnUpdate(const std::string& table_name,
-                              const Tuple& old_tuple,
-                              const Tuple& new_tuple,
-                              const RID& rid);
+                               const Tuple& old_tuple, const Tuple& new_tuple,
+                               const RID& rid);
     /**
      * 获取目录对象
      * @return 目录对象指针
@@ -6860,7 +7359,7 @@ public:
      * @return 索引管理器指针
      */
     IndexManager* GetIndexManager();
-private:
+   private:
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
     std::unique_ptr<IndexManager> index_manager_;
@@ -6871,9 +7370,14 @@ private:
      * @param key_columns 索引列名列表
      * @return 填充是否成功
      */
-    bool PopulateIndexWithExistingData(const std::string& index_name,
-                                      TableInfo* table_info,
-                                      const std::vector<std::string>& key_columns);
+    bool PopulateIndexWithExistingData(
+        const std::string& index_name, TableInfo* table_info,
+        const std::vector<std::string>& key_columns);
+    /**
+     * 重建所有索引
+     * 在初始化时调用，确保所有表的索引都被正确创建
+     */
+    void RebuildAllIndexes();
 };
 }
 
@@ -7113,6 +7617,8 @@ class ExecutionEngine {
     Catalog* catalog_;
     TransactionManager* txn_manager_;
     std::unique_ptr<TableManager> table_manager_;
+    std::string SelectBestIndex(const std::string& table_name,
+                                Expression* where_clause);
     std::unique_ptr<PlanNode> CreatePlan(Statement* statement);
     std::unique_ptr<Executor> CreateExecutor(ExecutorContext* exec_ctx,
                                              std::unique_ptr<PlanNode> plan);
@@ -7208,6 +7714,24 @@ class SeqScanExecutor : public Executor {
     TableInfo* table_info_;
     TableHeap::Iterator table_iterator_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
+};
+class IndexScanExecutor : public Executor {
+   public:
+    IndexScanExecutor(ExecutorContext* exec_ctx,
+                      std::unique_ptr<IndexScanPlanNode> plan);
+    void Init() override;
+    bool Next(Tuple* tuple, RID* rid) override;
+    IndexScanPlanNode* GetIndexScanPlan() const {
+        return static_cast<IndexScanPlanNode*>(plan_.get());
+    }
+   private:
+    TableInfo* table_info_;
+    IndexInfo* index_info_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
+    Value search_key_;
+    bool has_found_tuple_;
+    RID found_rid_;
+    void ExtractSearchKey(Expression* predicate);
 };
 class InsertExecutor : public Executor {
    public:
@@ -7329,39 +7853,42 @@ enum class PlanNodeType {
     LIMIT
 };
 class PlanNode {
-public:
-    PlanNode(const Schema* output_schema, std::vector<std::unique_ptr<PlanNode>> children)
+   public:
+    PlanNode(const Schema* output_schema,
+             std::vector<std::unique_ptr<PlanNode>> children)
         : output_schema_(output_schema), children_(std::move(children)) {}
     virtual ~PlanNode() = default;
     virtual PlanNodeType GetType() const = 0;
     const Schema* GetOutputSchema() const { return output_schema_; }
-    const std::vector<std::unique_ptr<PlanNode>>& GetChildren() const { return children_; }
-    const PlanNode* GetChild(size_t index) const { 
-        return index < children_.size() ? children_[index].get() : nullptr; 
+    const std::vector<std::unique_ptr<PlanNode>>& GetChildren() const {
+        return children_;
     }
-protected:
+    const PlanNode* GetChild(size_t index) const {
+        return index < children_.size() ? children_[index].get() : nullptr;
+    }
+   protected:
     const Schema* output_schema_;
     std::vector<std::unique_ptr<PlanNode>> children_;
 };
 class SeqScanPlanNode : public PlanNode {
-public:
-    SeqScanPlanNode(const Schema* output_schema, 
-                    const std::string& table_name,
+   public:
+    SeqScanPlanNode(const Schema* output_schema, const std::string& table_name,
                     std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           predicate_(std::move(predicate)) {}
-    PlanNodeType GetType() const override { return PlanNodeType::SEQUENTIAL_SCAN; }
+    PlanNodeType GetType() const override {
+        return PlanNodeType::SEQUENTIAL_SCAN;
+    }
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
-private:
+   private:
     std::string table_name_;
     std::unique_ptr<Expression> predicate_;
 };
 class InsertPlanNode : public PlanNode {
-public:
-    InsertPlanNode(const Schema* output_schema,
-                   const std::string& table_name,
+   public:
+    InsertPlanNode(const Schema* output_schema, const std::string& table_name,
                    std::vector<std::vector<Value>> values)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
@@ -7369,51 +7896,55 @@ public:
     PlanNodeType GetType() const override { return PlanNodeType::INSERT; }
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<std::vector<Value>>& GetValues() const { return values_; }
-private:
+   private:
     std::string table_name_;
     std::vector<std::vector<Value>> values_;
 };
 class ProjectionPlanNode : public PlanNode {
-public:
+   public:
     ProjectionPlanNode(const Schema* output_schema,
                        std::vector<std::unique_ptr<Expression>> expressions,
                        std::unique_ptr<PlanNode> child)
-        : PlanNode(output_schema, {}),
-          expressions_(std::move(expressions)) {
+        : PlanNode(output_schema, {}), expressions_(std::move(expressions)) {
         children_.push_back(std::move(child));
     }
     PlanNodeType GetType() const override { return PlanNodeType::PROJECTION; }
-    const std::vector<std::unique_ptr<Expression>>& GetExpressions() const { return expressions_; }
+    const std::vector<std::unique_ptr<Expression>>& GetExpressions() const {
+        return expressions_;
+    }
     void SetOwnedSchema(std::unique_ptr<Schema> schema) {
         owned_schema_ = std::move(schema);
     }
-private:
+   private:
     std::vector<std::unique_ptr<Expression>> expressions_;
     std::unique_ptr<Schema> owned_schema_;
 };
 class UpdatePlanNode : public PlanNode {
-public:
-    UpdatePlanNode(const Schema* output_schema,
-                   const std::string& table_name,
-                   std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates,
-                   std::unique_ptr<Expression> predicate = nullptr)
+   public:
+    UpdatePlanNode(
+        const Schema* output_schema, const std::string& table_name,
+        std::vector<std::pair<std::string, std::unique_ptr<Expression>>>
+            updates,
+        std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
           updates_(std::move(updates)),
           predicate_(std::move(predicate)) {}
     PlanNodeType GetType() const override { return PlanNodeType::UPDATE; }
     const std::string& GetTableName() const { return table_name_; }
-    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& GetUpdates() const { return updates_; }
+    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>&
+    GetUpdates() const {
+        return updates_;
+    }
     Expression* GetPredicate() const { return predicate_.get(); }
-private:
+   private:
     std::string table_name_;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates_;
     std::unique_ptr<Expression> predicate_;
 };
 class DeletePlanNode : public PlanNode {
-public:
-    DeletePlanNode(const Schema* output_schema,
-                   const std::string& table_name,
+   public:
+    DeletePlanNode(const Schema* output_schema, const std::string& table_name,
                    std::unique_ptr<Expression> predicate = nullptr)
         : PlanNode(output_schema, {}),
           table_name_(table_name),
@@ -7421,8 +7952,27 @@ public:
     PlanNodeType GetType() const override { return PlanNodeType::DELETE; }
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
-private:
+   private:
     std::string table_name_;
+    std::unique_ptr<Expression> predicate_;
+};
+class IndexScanPlanNode : public PlanNode {
+   public:
+    IndexScanPlanNode(const Schema* output_schema,
+                      const std::string& table_name,
+                      const std::string& index_name,
+                      std::unique_ptr<Expression> predicate = nullptr)
+        : PlanNode(output_schema, {}),
+          table_name_(table_name),
+          index_name_(index_name),
+          predicate_(std::move(predicate)) {}
+    PlanNodeType GetType() const override { return PlanNodeType::INDEX_SCAN; }
+    const std::string& GetTableName() const { return table_name_; }
+    const std::string& GetIndexName() const { return index_name_; }
+    Expression* GetPredicate() const { return predicate_.get(); }
+   private:
+    std::string table_name_;
+    std::string index_name_;
     std::unique_ptr<Expression> predicate_;
 };
 }
@@ -8034,6 +8584,7 @@ class Parser {
     std::unique_ptr<Statement> ParseCommitStatement();
     std::unique_ptr<Statement> ParseRollbackStatement();
     std::unique_ptr<Statement> ParseExplainStatement();
+    std::unique_ptr<Statement> ParseCreateIndexStatement();
     std::vector<Column> ParseColumnDefinitions();
     TypeId ParseDataType();
 };

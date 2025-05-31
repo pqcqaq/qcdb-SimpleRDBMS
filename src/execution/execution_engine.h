@@ -32,6 +32,9 @@ class ExecutionEngine {
     TransactionManager* txn_manager_;
     std::unique_ptr<TableManager> table_manager_;  // 添加 TableManager
 
+    std::string SelectBestIndex(const std::string& table_name,
+                                Expression* where_clause);
+
     // Create execution plan
     std::unique_ptr<PlanNode> CreatePlan(Statement* statement);
 

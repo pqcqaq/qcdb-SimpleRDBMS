@@ -96,7 +96,8 @@ bool ExecutionEngine::Execute(Statement* statement,
     }
 
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor context");
-    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_, table_manager_.get());
+    ExecutorContext exec_ctx(txn, catalog_, buffer_pool_manager_,
+                             table_manager_.get());
 
     LOG_DEBUG("ExecutionEngine::Execute: Creating executor");
     auto executor = CreateExecutor(&exec_ctx, std::move(plan));
@@ -220,6 +221,12 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
             return std::make_unique<SeqScanExecutor>(
                 exec_ctx, std::unique_ptr<SeqScanPlanNode>(seq_scan_plan));
         }
+        case PlanNodeType::INDEX_SCAN: {
+            auto index_scan_plan =
+                static_cast<IndexScanPlanNode*>(plan.release());
+            return std::make_unique<IndexScanExecutor>(
+                exec_ctx, std::unique_ptr<IndexScanPlanNode>(index_scan_plan));
+        }
         case PlanNodeType::PROJECTION: {
             auto projection_plan =
                 static_cast<ProjectionPlanNode*>(plan.release());
@@ -262,7 +269,6 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
         return nullptr;
     }
 
-    // 检查是否是 SELECT *
     const auto& select_list = stmt->GetSelectList();
     bool is_select_all = false;
     if (select_list.size() == 1) {
@@ -277,19 +283,33 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
               << stmt->GetTableName() << " with schema containing "
               << table_info->schema->GetColumnCount() << " columns");
 
-    // 克隆 WHERE 子句（重要！）
-    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+    // 检查是否可以使用索引
+    std::unique_ptr<PlanNode> scan_plan;
+    if (stmt->GetWhereClause()) {
+        std::string selected_index =
+            SelectBestIndex(stmt->GetTableName(), stmt->GetWhereClause());
+        if (!selected_index.empty()) {
+            LOG_DEBUG("Using index scan with index: " << selected_index);
+            auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+            scan_plan = std::make_unique<IndexScanPlanNode>(
+                table_info->schema.get(), stmt->GetTableName(), selected_index,
+                std::move(where_copy));
+        }
+    }
 
-    auto seq_scan_plan = std::make_unique<SeqScanPlanNode>(
-        table_info->schema.get(),  // SeqScan 使用完整的表 schema
-        stmt->GetTableName(),
-        std::move(where_copy)  // 传递WHERE子句而不是nullptr
-    );
+    // 如果不能使用索引，回退到顺序扫描
+    if (!scan_plan) {
+        LOG_DEBUG("Using sequential scan");
+        auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+        scan_plan = std::make_unique<SeqScanPlanNode>(table_info->schema.get(),
+                                                      stmt->GetTableName(),
+                                                      std::move(where_copy));
+    }
 
     if (is_select_all) {
-        return std::move(seq_scan_plan);
+        return std::move(scan_plan);
     } else {
-        // 创建投影 schema，只包含选定的列
+        // 需要投影
         std::vector<Column> selected_columns;
         for (const auto& expr : select_list) {
             auto* col_ref = dynamic_cast<ColumnRefExpression*>(expr.get());
@@ -306,21 +326,15 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
             }
         }
 
-        // 创建投影schema并将其存储在plan node中
         auto projection_schema = std::make_unique<Schema>(selected_columns);
         const Schema* output_schema = projection_schema.get();
-
-        // 创建投影表达式 - 使用克隆避免双重管理
         std::vector<std::unique_ptr<Expression>> expressions;
         for (const auto& expr : select_list) {
             expressions.push_back(ExpressionCloner::Clone(expr.get()));
         }
 
-        // 创建投影计划节点，并转移schema的所有权
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
-            output_schema, std::move(expressions), std::move(seq_scan_plan));
-
-        // 将schema存储在投影计划中
+            output_schema, std::move(expressions), std::move(scan_plan));
         projection_plan->SetOwnedSchema(std::move(projection_schema));
         return std::move(projection_plan);
     }
@@ -339,6 +353,87 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateInsertPlan(
 
     return std::make_unique<InsertPlanNode>(
         table_info->schema.get(), stmt->GetTableName(), stmt->GetValues());
+}
+
+std::string ExecutionEngine::SelectBestIndex(const std::string& table_name,
+                                             Expression* where_clause) {
+    if (!where_clause) {
+        return "";
+    }
+
+    LOG_DEBUG("SelectBestIndex: Analyzing WHERE clause for table "
+              << table_name);
+
+    // 简单的索引选择逻辑：支持等值查询
+    if (auto* binary_expr = dynamic_cast<BinaryOpExpression*>(where_clause)) {
+        if (binary_expr->GetOperator() == BinaryOpExpression::OpType::EQUALS) {
+            std::string column_name;
+
+            // 检查左操作数是否为列引用
+            if (auto* col_ref = dynamic_cast<ColumnRefExpression*>(
+                    binary_expr->GetLeft())) {
+                column_name = col_ref->GetColumnName();
+            }
+            // 检查右操作数是否为列引用（支持 value = column 的情况）
+            else if (auto* col_ref = dynamic_cast<ColumnRefExpression*>(
+                         binary_expr->GetRight())) {
+                column_name = col_ref->GetColumnName();
+            }
+
+            if (!column_name.empty()) {
+                // 确保另一个操作数是常量
+                bool has_constant = false;
+                if (dynamic_cast<ConstantExpression*>(binary_expr->GetLeft()) ||
+                    dynamic_cast<ConstantExpression*>(
+                        binary_expr->GetRight())) {
+                    has_constant = true;
+                }
+
+                if (has_constant) {
+                    LOG_DEBUG(
+                        "SelectBestIndex: Found equality condition on column: "
+                        << column_name);
+
+                    // 查找该列上的索引
+                    std::vector<IndexInfo*> indexes =
+                        catalog_->GetTableIndexes(table_name);
+                    for (auto* index_info : indexes) {
+                        if (index_info->key_columns.size() == 1 &&
+                            index_info->key_columns[0] == column_name) {
+                            LOG_DEBUG("SelectBestIndex: Found suitable index: "
+                                      << index_info->index_name);
+                            return index_info->index_name;
+                        }
+                    }
+                    LOG_DEBUG("SelectBestIndex: No index found for column: "
+                              << column_name);
+                }
+            }
+        }
+        // 可以扩展支持其他操作符，如 <, >, <=, >= 等
+        else {
+            LOG_DEBUG("SelectBestIndex: Unsupported operator for index usage");
+        }
+    }
+    // 可以扩展支持 AND/OR 复合条件
+    else if (auto* and_expr = dynamic_cast<BinaryOpExpression*>(where_clause)) {
+        if (and_expr->GetOperator() == BinaryOpExpression::OpType::AND) {
+            // 递归检查左右子表达式
+            std::string left_index =
+                SelectBestIndex(table_name, and_expr->GetLeft());
+            if (!left_index.empty()) {
+                return left_index;
+            }
+            std::string right_index =
+                SelectBestIndex(table_name, and_expr->GetRight());
+            if (!right_index.empty()) {
+                return right_index;
+            }
+        }
+    }
+
+    LOG_DEBUG("SelectBestIndex: No suitable index found for the WHERE clause");
+    return "";  // 没有找到合适的索引
 }
 
 bool ExecutionEngine::HandleShowTables(std::vector<Tuple>* result_set) {
@@ -456,22 +551,25 @@ bool ExecutionEngine::HandleExplain(ExplainStatement* stmt,
 
 std::string ExecutionEngine::FormatExecutionPlan(PlanNode* plan, int indent) {
     std::ostringstream oss;
-
-    // 添加缩进
     for (int i = 0; i < indent; i++) {
         oss << "  ";
     }
-
-    // 添加节点类型
     oss << "-> " << GetPlanNodeTypeString(plan->GetType());
-
-    // 添加节点特定信息
     switch (plan->GetType()) {
         case PlanNodeType::SEQUENTIAL_SCAN: {
             auto* seq_scan = static_cast<SeqScanPlanNode*>(plan);
             oss << " on " << seq_scan->GetTableName();
             if (seq_scan->GetPredicate()) {
                 oss << " (Filter: WHERE clause)";
+            }
+            break;
+        }
+        case PlanNodeType::INDEX_SCAN: {
+            auto* index_scan = static_cast<IndexScanPlanNode*>(plan);
+            oss << " using " << index_scan->GetIndexName() << " on "
+                << index_scan->GetTableName();
+            if (index_scan->GetPredicate()) {
+                oss << " (Index Cond: WHERE clause)";
             }
             break;
         }
@@ -505,15 +603,11 @@ std::string ExecutionEngine::FormatExecutionPlan(PlanNode* plan, int indent) {
         default:
             break;
     }
-
     oss << "\n";
-
-    // 递归处理子节点
     const auto& children = plan->GetChildren();
     for (const auto& child : children) {
         oss << FormatExecutionPlan(child.get(), indent + 1);
     }
-
     return oss.str();
 }
 

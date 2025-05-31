@@ -6,28 +6,72 @@
 
 #include "catalog/catalog.h"  // 添加完整的 catalog.h 包含
 #include "catalog/schema.h"
-#include "common/exception.h"
-#include "index/index_manager.h"
-#include "record/table_heap.h"
 #include "common/debug.h"
+#include "common/exception.h"
 #include "common/types.h"
+#include "index/index_manager.h"
 #include "parser/ast.h"
+#include "record/table_heap.h"
 
 namespace SimpleRDBMS {
 
 TableManager::TableManager(BufferPoolManager* buffer_pool_manager,
                            Catalog* catalog)
     : buffer_pool_manager_(buffer_pool_manager), catalog_(catalog) {
-    index_manager_ = std::make_unique<IndexManager>(buffer_pool_manager, catalog);
+    index_manager_ =
+        std::make_unique<IndexManager>(buffer_pool_manager, catalog);
+
+    // 重建所有索引
+    RebuildAllIndexes();
 }
 
 TableManager::~TableManager() {
     // 确保在析构时正确清理索引管理器
     if (index_manager_) {
         LOG_DEBUG("TableManager::~TableManager: Destroying IndexManager");
-        index_manager_.reset(); // 显式重置
+        index_manager_.reset();  // 显式重置
     }
     LOG_DEBUG("TableManager::~TableManager: TableManager destroyed");
+}
+
+void TableManager::RebuildAllIndexes() {
+    LOG_DEBUG("TableManager::RebuildAllIndexes: Starting index rebuild");
+    
+    // 获取所有表名
+    std::vector<std::string> table_names = catalog_->GetAllTableNames();
+    
+    for (const auto& table_name : table_names) {
+        // 获取该表的所有索引
+        std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
+        
+        for (auto* index_info : indexes) {
+            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index " << index_info->index_name);
+            
+            TableInfo* table_info = catalog_->GetTable(table_name);
+            if (!table_info) {
+                LOG_ERROR("TableManager::RebuildAllIndexes: Table " << table_name << " not found");
+                continue;
+            }
+            
+            // 重新创建物理索引
+            bool success = index_manager_->CreateIndex(
+                index_info->index_name,
+                table_name,
+                index_info->key_columns,
+                table_info->schema.get()
+            );
+            
+            if (!success) {
+                LOG_ERROR("TableManager::RebuildAllIndexes: Failed to rebuild index " << index_info->index_name);
+                continue;
+            }
+            
+            // 用现有数据填充索引
+            PopulateIndexWithExistingData(index_info->index_name, table_info, index_info->key_columns);
+        }
+    }
+    
+    LOG_DEBUG("TableManager::RebuildAllIndexes: Index rebuild completed");
 }
 
 bool TableManager::CreateIndex(const std::string& index_name,
@@ -35,26 +79,26 @@ bool TableManager::CreateIndex(const std::string& index_name,
                                const std::vector<std::string>& key_columns) {
     LOG_DEBUG("TableManager::CreateIndex: Creating index "
               << index_name << " on table " << table_name);
-    
+
     // 检查索引是否已存在
     if (catalog_->GetIndex(index_name) != nullptr) {
         LOG_WARN("TableManager::CreateIndex: Index " << index_name
                                                      << " already exists");
         return false;
     }
-    
+
     TableInfo* table_info = catalog_->GetTable(table_name);
     if (table_info == nullptr) {
         LOG_ERROR("TableManager::CreateIndex: Table " << table_name
                                                       << " not found");
         return false;
     }
-    
+
     if (key_columns.empty()) {
         LOG_ERROR("TableManager::CreateIndex: Key columns cannot be empty");
         return false;
     }
-    
+
     const Schema* schema = table_info->schema.get();
     for (const auto& key_column : key_columns) {
         if (!schema->HasColumn(key_column)) {
@@ -63,14 +107,14 @@ bool TableManager::CreateIndex(const std::string& index_name,
             return false;
         }
     }
-    
+
     std::unordered_set<std::string> key_column_set(key_columns.begin(),
                                                    key_columns.end());
     if (key_column_set.size() != key_columns.size()) {
         LOG_ERROR("TableManager::CreateIndex: Duplicate columns in key");
         return false;
     }
-    
+
     // 先在目录中创建索引信息
     bool catalog_success =
         catalog_->CreateIndex(index_name, table_name, key_columns);
@@ -79,16 +123,16 @@ bool TableManager::CreateIndex(const std::string& index_name,
             "TableManager::CreateIndex: Failed to create index in catalog");
         return false;
     }
-    
+
     // 然后在索引管理器中创建物理索引
     bool index_success = index_manager_->CreateIndex(index_name, table_name,
                                                      key_columns, schema);
     if (!index_success) {
         LOG_ERROR("TableManager::CreateIndex: Failed to create physical index");
-        catalog_->DropIndex(index_name); // 清理目录中的索引信息
+        catalog_->DropIndex(index_name);  // 清理目录中的索引信息
         return false;
     }
-    
+
     LOG_DEBUG(
         "TableManager::CreateIndex: Physical index created, now populating "
         "with existing data");
@@ -99,7 +143,7 @@ bool TableManager::CreateIndex(const std::string& index_name,
             "TableManager::CreateIndex: Failed to populate index with existing "
             "data");
     }
-    
+
     LOG_DEBUG("TableManager::CreateIndex: Index " << index_name
                                                   << " created successfully");
     try {
@@ -112,7 +156,7 @@ bool TableManager::CreateIndex(const std::string& index_name,
             "creation: "
             << e.what());
     }
-    
+
     return true;
 }
 
@@ -276,7 +320,7 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
             const std::string& column_name = index_info->key_columns[0];
             size_t column_idx = table_info->schema->GetColumnIdx(column_name);
             Value key_value = tuple.GetValue(column_idx);
-            
+
             // 修复：真正调用 IndexManager 的 InsertEntry 方法
             bool success =
                 index_manager_->InsertEntry(index_name, key_value, rid);
@@ -287,8 +331,10 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                     << index_name);
                 all_success = false;
             } else {
-                LOG_TRACE("TableManager::UpdateIndexesOnInsert: Successfully inserted "
-                         << "into index " << index_name);
+                LOG_TRACE(
+                    "TableManager::UpdateIndexesOnInsert: Successfully "
+                    "inserted "
+                    << "into index " << index_name);
             }
         } catch (const std::exception& e) {
             LOG_ERROR(
@@ -299,7 +345,6 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
     }
     return all_success;
 }
-
 
 bool TableManager::UpdateIndexesOnDelete(const std::string& table_name,
                                          const Tuple& tuple) {
@@ -335,7 +380,7 @@ bool TableManager::UpdateIndexesOnDelete(const std::string& table_name,
             const std::string& column_name = index_info->key_columns[0];
             size_t column_idx = table_info->schema->GetColumnIdx(column_name);
             Value key_value = tuple.GetValue(column_idx);
-            
+
             // 修复：真正调用 IndexManager 的 DeleteEntry 方法
             bool success = index_manager_->DeleteEntry(index_name, key_value);
             if (!success) {
@@ -345,8 +390,9 @@ bool TableManager::UpdateIndexesOnDelete(const std::string& table_name,
                     << index_name);
                 all_success = false;
             } else {
-                LOG_TRACE("TableManager::UpdateIndexesOnDelete: Successfully deleted "
-                         << "from index " << index_name);
+                LOG_TRACE(
+                    "TableManager::UpdateIndexesOnDelete: Successfully deleted "
+                    << "from index " << index_name);
             }
         } catch (const std::exception& e) {
             LOG_ERROR(
@@ -395,7 +441,7 @@ bool TableManager::UpdateIndexesOnUpdate(const std::string& table_name,
             size_t column_idx = table_info->schema->GetColumnIdx(column_name);
             Value old_key_value = old_tuple.GetValue(column_idx);
             Value new_key_value = new_tuple.GetValue(column_idx);
-            
+
             // 检查键值是否真的改变了
             if (old_key_value.index() == new_key_value.index()) {
                 bool keys_equal = false;
@@ -409,10 +455,10 @@ bool TableManager::UpdateIndexesOnUpdate(const std::string& table_name,
                     },
                     old_key_value);
                 if (keys_equal) {
-                    continue; // 键值没有改变，跳过
+                    continue;  // 键值没有改变，跳过
                 }
             }
-            
+
             // 修复：真正调用 IndexManager 的方法
             bool delete_success =
                 index_manager_->DeleteEntry(index_name, old_key_value);
@@ -452,30 +498,35 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
         return false;
     }
 
-    LOG_DEBUG("TableManager::CreateTable: Creating table " << stmt->GetTableName());
+    LOG_DEBUG("TableManager::CreateTable: Creating table "
+              << stmt->GetTableName());
     const std::string& table_name = stmt->GetTableName();
     const std::vector<Column>& columns = stmt->GetColumns();
 
     if (columns.empty()) {
-        LOG_ERROR("TableManager::CreateTable: No columns defined for table " << table_name);
+        LOG_ERROR("TableManager::CreateTable: No columns defined for table "
+                  << table_name);
         return false;
     }
 
     Schema schema(columns);
     bool success = catalog_->CreateTable(table_name, schema);
     if (!success) {
-        LOG_ERROR("TableManager::CreateTable: Failed to create table " << table_name);
+        LOG_ERROR("TableManager::CreateTable: Failed to create table "
+                  << table_name);
         return false;
     }
 
-    LOG_DEBUG("TableManager::CreateTable: Table " << table_name << " created successfully");
+    LOG_DEBUG("TableManager::CreateTable: Table " << table_name
+                                                  << " created successfully");
 
     // Find primary key column
     std::string primary_key_column;
     for (const auto& column : columns) {
         if (column.is_primary_key) {
             primary_key_column = column.name;
-            LOG_DEBUG("TableManager::CreateTable: Found primary key column: " << primary_key_column);
+            LOG_DEBUG("TableManager::CreateTable: Found primary key column: "
+                      << primary_key_column);
             break;
         }
     }
@@ -483,15 +534,20 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
     if (!primary_key_column.empty()) {
         std::string primary_key_index_name = table_name + "_pk";
         std::vector<std::string> key_columns = {primary_key_column};
-        
-        LOG_DEBUG("TableManager::CreateTable: Creating primary key index " 
-                  << primary_key_index_name << " on column " << primary_key_column);
+
+        LOG_DEBUG("TableManager::CreateTable: Creating primary key index "
+                  << primary_key_index_name << " on column "
+                  << primary_key_column);
 
         // First create in catalog
-        bool catalog_success = catalog_->CreateIndex(primary_key_index_name, table_name, key_columns);
+        bool catalog_success = catalog_->CreateIndex(primary_key_index_name,
+                                                     table_name, key_columns);
         if (!catalog_success) {
-            LOG_ERROR("TableManager::CreateTable: Failed to create primary key index in catalog");
-            // Clean up the table since we couldn't create the required primary key index
+            LOG_ERROR(
+                "TableManager::CreateTable: Failed to create primary key index "
+                "in catalog");
+            // Clean up the table since we couldn't create the required primary
+            // key index
             catalog_->DropTable(table_name);
             return false;
         }
@@ -499,24 +555,29 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
         // Then create the physical index
         TableInfo* table_info = catalog_->GetTable(table_name);
         if (!table_info) {
-            LOG_ERROR("TableManager::CreateTable: Table info not found after creation");
+            LOG_ERROR(
+                "TableManager::CreateTable: Table info not found after "
+                "creation");
             catalog_->DropTable(table_name);
             return false;
         }
 
-        bool index_success = index_manager_->CreateIndex(
-            primary_key_index_name, table_name, key_columns, table_info->schema.get());
-        
+        bool index_success =
+            index_manager_->CreateIndex(primary_key_index_name, table_name,
+                                        key_columns, table_info->schema.get());
+
         if (!index_success) {
-            LOG_ERROR("TableManager::CreateTable: Failed to create physical primary key index");
+            LOG_ERROR(
+                "TableManager::CreateTable: Failed to create physical primary "
+                "key index");
             catalog_->DropIndex(primary_key_index_name);
             catalog_->DropTable(table_name);
             return false;
         }
-        
-        LOG_DEBUG("TableManager::CreateTable: Primary key index " << primary_key_index_name 
-                  << " created successfully");
-                  
+
+        LOG_DEBUG("TableManager::CreateTable: Primary key index "
+                  << primary_key_index_name << " created successfully");
+
         // Verify the index was created
         auto all_indexes = index_manager_->GetAllIndexNames();
         bool found_pk_index = false;
@@ -526,19 +587,26 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
                 break;
             }
         }
-        
+
         if (!found_pk_index) {
-            LOG_ERROR("TableManager::CreateTable: Primary key index not found after creation");
+            LOG_ERROR(
+                "TableManager::CreateTable: Primary key index not found after "
+                "creation");
             catalog_->DropTable(table_name);
             return false;
         }
-        
-        LOG_DEBUG("TableManager::CreateTable: Verified primary key index exists");
+
+        LOG_DEBUG(
+            "TableManager::CreateTable: Verified primary key index exists");
     } else {
-        LOG_DEBUG("TableManager::CreateTable: No primary key column found for table " << table_name);
+        LOG_DEBUG(
+            "TableManager::CreateTable: No primary key column found for table "
+            << table_name);
     }
 
-    LOG_DEBUG("TableManager::CreateTable: Successfully completed table creation for " << table_name);
+    LOG_DEBUG(
+        "TableManager::CreateTable: Successfully completed table creation for "
+        << table_name);
     return true;
 }
 

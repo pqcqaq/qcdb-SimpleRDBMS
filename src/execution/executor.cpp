@@ -82,6 +82,70 @@ bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
     return false;
 }
 
+IndexScanExecutor::IndexScanExecutor(ExecutorContext* exec_ctx,
+                                     std::unique_ptr<IndexScanPlanNode> plan)
+    : Executor(exec_ctx, std::move(plan)),
+      table_info_(nullptr),
+      index_info_(nullptr),
+      has_found_tuple_(false) {}
+
+void IndexScanExecutor::Init() {
+    auto* index_scan_plan = GetIndexScanPlan();
+    
+    table_info_ = exec_ctx_->GetCatalog()->GetTable(index_scan_plan->GetTableName());
+    if (table_info_ == nullptr) {
+        throw ExecutionException("Table not found: " + index_scan_plan->GetTableName());
+    }
+    
+    index_info_ = exec_ctx_->GetCatalog()->GetIndex(index_scan_plan->GetIndexName());
+    if (index_info_ == nullptr) {
+        throw ExecutionException("Index not found: " + index_scan_plan->GetIndexName());
+    }
+    
+    evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+    has_found_tuple_ = false;
+    
+    // 从WHERE条件中提取搜索键值
+    ExtractSearchKey(index_scan_plan->GetPredicate());
+}
+
+bool IndexScanExecutor::Next(Tuple* tuple, RID* rid) {
+    if (has_found_tuple_) {
+        return false; // 索引查找只返回一个结果
+    }
+    
+    auto* index_scan_plan = GetIndexScanPlan();
+    TableManager* table_manager = exec_ctx_->GetTableManager();
+    IndexManager* index_manager = table_manager->GetIndexManager();
+    
+    RID found_rid;
+    bool found = index_manager->FindEntry(index_scan_plan->GetIndexName(), search_key_, &found_rid);
+    
+    if (found) {
+        // 通过RID获取完整的tuple
+        bool success = table_info_->table_heap->GetTuple(found_rid, tuple, exec_ctx_->GetTransaction()->GetTxnId());
+        if (success) {
+            *rid = found_rid;
+            has_found_tuple_ = true;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+void IndexScanExecutor::ExtractSearchKey(Expression* predicate) {
+    // 这里需要实现从WHERE条件中提取搜索键的逻辑
+    // 简化版本：假设是 column = value 的形式
+    if (auto* binary_expr = dynamic_cast<BinaryOpExpression*>(predicate)) {
+        if (binary_expr->GetOperator() == BinaryOpExpression::OpType::EQUALS) {
+            if (auto* const_expr = dynamic_cast<ConstantExpression*>(binary_expr->GetRight())) {
+                search_key_ = const_expr->GetValue();
+            }
+        }
+    }
+}
+
 // InsertExecutor implementation
 InsertExecutor::InsertExecutor(ExecutorContext* exec_ctx,
                                std::unique_ptr<InsertPlanNode> plan)

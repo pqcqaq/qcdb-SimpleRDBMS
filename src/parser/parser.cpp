@@ -363,7 +363,6 @@ std::unique_ptr<Statement> Parser::ParseSelectStatement() {
 }
 
 std::unique_ptr<Statement> Parser::ParseCreateTableStatement() {
-    Expect(TokenType::CREATE);
     Expect(TokenType::TABLE);
 
     if (current_token_.type != TokenType::IDENTIFIER) {
@@ -633,8 +632,16 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
     switch (current_token_.type) {
         case TokenType::SELECT:
             return ParseSelectStatement();
-        case TokenType::CREATE:
-            return ParseCreateTableStatement();
+        case TokenType::CREATE: {
+            Advance();  // 跳过CREATE
+            if (current_token_.type == TokenType::TABLE) {
+                return ParseCreateTableStatement();
+            } else if (current_token_.type == TokenType::INDEX) {
+                return ParseCreateIndexStatement();
+            } else {
+                throw Exception("Expected TABLE or INDEX after CREATE");
+            }
+        }
         case TokenType::INSERT:
             return ParseInsertStatement();
         case TokenType::UPDATE:
@@ -820,6 +827,39 @@ std::unique_ptr<Statement> Parser::ParseExplainStatement() {
     }
 
     return std::make_unique<ExplainStatement>(std::move(stmt));
+}
+
+std::unique_ptr<Statement> Parser::ParseCreateIndexStatement() {
+    Expect(TokenType::INDEX);
+    
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected index name");
+    }
+    std::string index_name = current_token_.value;
+    Advance();
+    
+    Expect(TokenType::ON);
+    
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected table name");
+    }
+    std::string table_name = current_token_.value;
+    Advance();
+    
+    Expect(TokenType::LPAREN);
+    
+    std::vector<std::string> key_columns;
+    do {
+        if (current_token_.type != TokenType::IDENTIFIER) {
+            throw Exception("Expected column name");
+        }
+        key_columns.push_back(current_token_.value);
+        Advance();
+    } while (Match(TokenType::COMMA));
+    
+    Expect(TokenType::RPAREN);
+    
+    return std::make_unique<CreateIndexStatement>(index_name, table_name, key_columns);
 }
 
 void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
