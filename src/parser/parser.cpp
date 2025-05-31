@@ -70,6 +70,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"BEGIN", TokenType::BEGIN},
     {"COMMIT", TokenType::COMMIT},
     {"ROLLBACK", TokenType::ROLLBACK},
+    {"EXPLAIN", TokenType::EXPLAIN},
 };
 
 Lexer::Lexer(const std::string& input)
@@ -643,6 +644,8 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
             return ParseCommitStatement();
         case TokenType::ROLLBACK:
             return ParseRollbackStatement();
+        case TokenType::EXPLAIN:
+            return ParseExplainStatement();
         default:
             throw Exception("Unsupported statement type");
     }
@@ -802,8 +805,21 @@ std::unique_ptr<Statement> Parser::ParseRollbackStatement() {
     return std::make_unique<RollbackStatement>();
 }
 
+std::unique_ptr<Statement> Parser::ParseExplainStatement() {
+    Expect(TokenType::EXPLAIN);
+
+    // 解析要 EXPLAIN 的语句
+    auto stmt = ParseStatement();
+    if (!stmt) {
+        throw Exception("Expected statement after EXPLAIN");
+    }
+
+    return std::make_unique<ExplainStatement>(std::move(stmt));
+}
+
 void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void BeginStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void CommitStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void RollbackStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
+void ExplainStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 }  // namespace SimpleRDBMS

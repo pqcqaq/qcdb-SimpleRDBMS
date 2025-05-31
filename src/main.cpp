@@ -1,11 +1,11 @@
+#include <algorithm>
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <set>
-#include <string>
 #include <sstream>
-#include <algorithm>
-#include <iomanip>
-#include <chrono>
+#include <string>
 
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
@@ -59,11 +59,11 @@ class SimpleRDBMSServer {
         std::cout << "SimpleRDBMS Server Started!" << std::endl;
         std::cout << "Enter SQL commands (type 'exit' to quit):" << std::endl;
         std::cout << "Note: SQL statements must end with ';'" << std::endl;
-        
+
         std::string accumulated_sql;
         std::string line;
         bool is_first_line = true;
-        
+
         while (true) {
             // 显示提示符
             if (is_first_line) {
@@ -72,61 +72,64 @@ class SimpleRDBMSServer {
             } else {
                 std::cout << "          -> ";  // 续行提示符
             }
-            
+
             if (!std::getline(std::cin, line)) {
                 break;  // EOF
             }
-            
+
             // 去除行首尾空白
             line = TrimWhitespace(line);
-            
+
             // 检查退出命令（只有在新语句开始时才检查）
             if (accumulated_sql.empty() && (line == "exit" || line == "quit")) {
                 break;
             }
-            
+
             // 如果是空行且没有累积的SQL，继续
             if (line.empty() && accumulated_sql.empty()) {
                 is_first_line = true;
                 continue;
             }
-            
+
             // 将当前行添加到累积的SQL中
             if (!accumulated_sql.empty()) {
                 accumulated_sql += " ";  // 在行之间添加空格
             }
             accumulated_sql += line;
-            
+
             // 检查是否包含分号
             size_t semicolon_pos = accumulated_sql.find(';');
             while (semicolon_pos != std::string::npos) {
                 // 提取到分号为止的SQL语句
-                std::string sql_to_execute = accumulated_sql.substr(0, semicolon_pos);
+                std::string sql_to_execute =
+                    accumulated_sql.substr(0, semicolon_pos);
                 sql_to_execute = TrimWhitespace(sql_to_execute);
-                
+
                 // 执行SQL语句（如果不为空）
                 if (!sql_to_execute.empty()) {
                     auto start_time = std::chrono::high_resolution_clock::now();
                     ExecuteSQL(sql_to_execute);
                     auto end_time = std::chrono::high_resolution_clock::now();
-                    
-                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        end_time - start_time);
-                    std::cout << "Query executed in " << duration.count() << " ms" << std::endl;
+
+                    auto duration =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            end_time - start_time);
+                    std::cout << "Query executed in " << duration.count()
+                              << " ms" << std::endl;
                 }
-                
+
                 // 移除已执行的部分
                 accumulated_sql = accumulated_sql.substr(semicolon_pos + 1);
                 accumulated_sql = TrimWhitespace(accumulated_sql);
-                
+
                 // 查找下一个分号
                 semicolon_pos = accumulated_sql.find(';');
-                
+
                 // 如果还有剩余的SQL，重置为续行状态，否则重置为新语句状态
                 is_first_line = accumulated_sql.empty();
             }
         }
-        
+
         std::cout << "Shutting down..." << std::endl;
         Shutdown();
     }
@@ -232,6 +235,9 @@ class SimpleRDBMSServer {
                         std::cout << "DDL operation completed successfully."
                                   << std::endl;
                         break;
+                    case Statement::StmtType::EXPLAIN:
+                        DisplayExplainResults(result_set);
+                        break;
                     default:
                         break;
                 }
@@ -242,6 +248,53 @@ class SimpleRDBMSServer {
         } catch (const std::exception& e) {
             std::cout << "Error: " << e.what() << std::endl;
         }
+    }
+
+    void DisplayExplainResults(const std::vector<Tuple>& result_set) {
+        if (result_set.empty()) {
+            std::cout << "No execution plan available." << std::endl;
+            return;
+        }
+
+        // 计算最长行的长度，用于绘制边框
+        size_t max_length = 20;  // 最小宽度
+        for (const auto& tuple : result_set) {
+            std::string plan_line = std::get<std::string>(tuple.GetValue(0));
+            max_length = std::max(max_length, plan_line.length());
+        }
+
+        // 添加一些额外的空间
+        max_length += 4;
+
+        std::cout << "\n";
+
+        // 打印顶部边框（使用 ASCII 字符）
+        std::cout << "+" << std::string(max_length, '-') << "+" << std::endl;
+
+        // 打印标题
+        std::string title = "QUERY PLAN";
+        size_t padding = (max_length - title.length()) / 2;
+        std::cout << "|" << std::string(padding, ' ') << title
+                  << std::string(max_length - padding - title.length(), ' ')
+                  << "|" << std::endl;
+
+        // 打印分隔线
+        std::cout << "+" << std::string(max_length, '-') << "+" << std::endl;
+
+        // 显示每一行执行计划
+        for (const auto& tuple : result_set) {
+            std::string plan_line = std::get<std::string>(tuple.GetValue(0));
+            std::cout << "| " << std::left << std::setw(max_length - 2)
+                      << plan_line << " |" << std::endl;
+        }
+
+        // 打印底部边框
+        std::cout << "+" << std::string(max_length, '-') << "+" << std::endl;
+
+        std::cout << "\n(" << result_set.size() << " step"
+                  << (result_set.size() != 1 ? "s" : "")
+                  << " in execution plan)\n"
+                  << std::endl;
     }
 
     // 显示 SHOW TABLES 结果

@@ -66,6 +66,8 @@ enum class TokenType {
     BEGIN,
     COMMIT,
     ROLLBACK,
+    // explain
+    EXPLAIN,
 };
 
 struct Token {

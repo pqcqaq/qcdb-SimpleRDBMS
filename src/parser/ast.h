@@ -73,7 +73,8 @@ class Statement : public ASTNode {
         SHOW_TABLES,
         BEGIN_TXN,
         COMMIT_TXN,
-        ROLLBACK_TXN
+        ROLLBACK_TXN,
+        EXPLAIN
     };
 
     virtual StmtType GetType() const = 0;
@@ -207,7 +208,8 @@ class BinaryOpExpression : public Expression {
         SHOW_TABLES,  // 显示所有表
         BEGIN_TXN,
         COMMIT_TXN,
-        ROLLBACK_TXN
+        ROLLBACK_TXN,
+        EXPLAIN,
     };
 
     BinaryOpExpression(std::unique_ptr<Expression> left, OpType op,
@@ -325,6 +327,20 @@ class RollbackStatement : public Statement {
     StmtType GetType() const override { return StmtType::ROLLBACK_TXN; }
     void Accept(ASTVisitor* visitor) override;
 };
+
+class ExplainStatement : public Statement {
+   public:
+    explicit ExplainStatement(std::unique_ptr<Statement> stmt)
+        : statement_(std::move(stmt)) {}
+
+    StmtType GetType() const override { return StmtType::EXPLAIN; }
+    void Accept(ASTVisitor* visitor) override;
+
+    Statement* GetStatement() const { return statement_.get(); }
+
+   private:
+    std::unique_ptr<Statement> statement_;
+};
 // Visitor pattern for AST traversal
 class ASTVisitor {
    public:
@@ -345,6 +361,7 @@ class ASTVisitor {
     virtual void Visit(BeginStatement* stmt) = 0;
     virtual void Visit(CommitStatement* stmt) = 0;
     virtual void Visit(RollbackStatement* stmt) = 0;
+    virtual void Visit(ExplainStatement* stmt) = 0;
 };
 
 }  // namespace SimpleRDBMS

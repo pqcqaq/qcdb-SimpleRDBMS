@@ -1357,37 +1357,34 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
             return nullptr;
     }
 }
-std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
-    SelectStatement* stmt) {
+std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stmt) {
     if (!stmt) {
         LOG_ERROR("CreateSelectPlan: SelectStatement is null");
         return nullptr;
     }
-    LOG_DEBUG("CreateSelectPlan: Creating plan for table "
-              << stmt->GetTableName());
+    LOG_DEBUG("CreateSelectPlan: Creating plan for table " << stmt->GetTableName());
     TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
     if (!table_info) {
-        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName()
-                                              << "' not found in catalog");
+        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName() << "' not found in catalog");
         return nullptr;
     }
     // 检查是否是 SELECT *
     const auto& select_list = stmt->GetSelectList();
     bool is_select_all = false;
     if (select_list.size() == 1) {
-        auto* col_ref =
-            dynamic_cast<ColumnRefExpression*>(select_list[0].get());
+        auto* col_ref = dynamic_cast<ColumnRefExpression*>(select_list[0].get());
         if (col_ref && col_ref->GetColumnName() == "*") {
             is_select_all = true;
         }
     }
-    LOG_DEBUG("CreateSelectPlan: Found table "
-              << stmt->GetTableName() << " with schema containing "
-              << table_info->schema->GetColumnCount() << " columns");
+    LOG_DEBUG("CreateSelectPlan: Found table " << stmt->GetTableName() 
+              << " with schema containing " << table_info->schema->GetColumnCount() << " columns");
+    // 克隆 WHERE 子句（重要！）
+    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
     auto seq_scan_plan = std::make_unique<SeqScanPlanNode>(
         table_info->schema.get(),  // SeqScan 使用完整的表 schema
         stmt->GetTableName(),
-        nullptr  // WHERE clause will be handled later
+        std::move(where_copy)      // 传递WHERE子句而不是nullptr
     );
     if (is_select_all) {
         return std::move(seq_scan_plan);
@@ -1399,11 +1396,9 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
             if (col_ref) {
                 const std::string& col_name = col_ref->GetColumnName();
                 if (table_info->schema->HasColumn(col_name)) {
-                    selected_columns.push_back(
-                        table_info->schema->GetColumn(col_name));
+                    selected_columns.push_back(table_info->schema->GetColumn(col_name));
                 } else {
-                    LOG_ERROR("CreateSelectPlan: Column '"
-                              << col_name << "' not found in table");
+                    LOG_ERROR("CreateSelectPlan: Column '" << col_name << "' not found in table");
                     return nullptr;
                 }
             }
@@ -1419,7 +1414,7 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
         // 创建投影计划节点，并转移schema的所有权
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
             output_schema, std::move(expressions), std::move(seq_scan_plan));
-        // 将schema存储在投影计划中（需要修改ProjectionPlanNode）
+        // 将schema存储在投影计划中
         projection_plan->SetOwnedSchema(std::move(projection_schema));
         return std::move(projection_plan);
     }
@@ -1532,7 +1527,11 @@ void SeqScanExecutor::Init() {
 }
 bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
     auto* seq_scan_plan = GetSeqScanPlan();
-    if (!table_iterator_.IsEnd()) {
+    // 创建表达式求值器（如果还没有）
+    if (!evaluator_ && seq_scan_plan->GetPredicate()) {
+        evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+    }
+    while (!table_iterator_.IsEnd()) {
         try {
             LOG_DEBUG("SeqScanExecutor::Next: getting current tuple");
             // Get current tuple
@@ -1546,12 +1545,16 @@ bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
                       << table_iterator_.IsEnd());
             // Apply predicate if exists
             Expression* predicate = seq_scan_plan->GetPredicate();
-            if (predicate == nullptr || true) {  // TODO: 实现谓词评估
-                return true;
+            if (predicate == nullptr) {
+                return true; // 没有WHERE条件，返回所有记录
             }
+            // 求值WHERE条件
+            if (evaluator_->EvaluateAsBoolean(predicate, *tuple)) {
+                return true; // 满足WHERE条件
+            }
+            // 不满足条件，继续下一个tuple
         } catch (const std::exception& e) {
-            LOG_ERROR(
-                "SeqScanExecutor::Next: Exception during scan: " << e.what());
+            LOG_ERROR("SeqScanExecutor::Next: Exception during scan: " << e.what());
             return false;
         }
     }
@@ -1873,10 +1876,12 @@ Value ExpressionEvaluator::Evaluate(const Expression* expr,
             throw ExecutionException("Unsupported expression type");
     }
 }
-bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr,
-                                            const Tuple& tuple) {
+bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr, const Tuple& tuple) {
     Value result = Evaluate(expr, tuple);
-    return IsValueTrue(result);
+    bool bool_result = IsValueTrue(result);
+    // 添加调试输出
+    LOG_DEBUG("EvaluateAsBoolean: result = " << bool_result);
+    return bool_result;
 }
 Value ExpressionEvaluator::EvaluateConstant(const ConstantExpression* expr,
                                             const Tuple& tuple) {
@@ -2041,7 +2046,7 @@ bool ExpressionEvaluator::CompareValues(const Value& left, const Value& right,
                                       std::get<std::string>(right), op);
         }
     }
-    // 安全的数值类型转换
+    // 处理数值类型间的转换比较
     auto safe_to_double = [](const Value& val) -> std::pair<bool, double> {
         try {
             if (std::holds_alternative<int8_t>(val))
@@ -3355,33 +3360,75 @@ class SimpleRDBMSServer {
     void Run() {
         std::cout << "SimpleRDBMS Server Started!" << std::endl;
         std::cout << "Enter SQL commands (type 'exit' to quit):" << std::endl;
+        std::cout << "Note: SQL statements must end with ';'" << std::endl;
+        std::string accumulated_sql;
         std::string line;
+        bool is_first_line = true;
         while (true) {
-            std::cout << "SimpleRDBMS> ";
+            // 显示提示符
+            if (is_first_line) {
+                std::cout << "SimpleRDBMS> ";
+                is_first_line = false;
+            } else {
+                std::cout << "          -> ";  // 续行提示符
+            }
             if (!std::getline(std::cin, line)) {
+                break;  // EOF
+            }
+            // 去除行首尾空白
+            line = TrimWhitespace(line);
+            // 检查退出命令（只有在新语句开始时才检查）
+            if (accumulated_sql.empty() && (line == "exit" || line == "quit")) {
                 break;
             }
-            if (line == "exit" || line == "quit") {
-                break;
-            }
-            if (line.empty()) {
+            // 如果是空行且没有累积的SQL，继续
+            if (line.empty() && accumulated_sql.empty()) {
+                is_first_line = true;
                 continue;
             }
-            // 开始时间
-            auto start_time = std::chrono::high_resolution_clock::now();
-            ExecuteSQL(line);
-            auto end_time = std::chrono::high_resolution_clock::now();
-            // 计算并输出执行时间
-            auto duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time);
-            std::cout << "Query executed in " << duration.count() << " ms"
-                      << std::endl;
+            // 将当前行添加到累积的SQL中
+            if (!accumulated_sql.empty()) {
+                accumulated_sql += " ";  // 在行之间添加空格
+            }
+            accumulated_sql += line;
+            // 检查是否包含分号
+            size_t semicolon_pos = accumulated_sql.find(';');
+            while (semicolon_pos != std::string::npos) {
+                // 提取到分号为止的SQL语句
+                std::string sql_to_execute = accumulated_sql.substr(0, semicolon_pos);
+                sql_to_execute = TrimWhitespace(sql_to_execute);
+                // 执行SQL语句（如果不为空）
+                if (!sql_to_execute.empty()) {
+                    auto start_time = std::chrono::high_resolution_clock::now();
+                    ExecuteSQL(sql_to_execute);
+                    auto end_time = std::chrono::high_resolution_clock::now();
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        end_time - start_time);
+                    std::cout << "Query executed in " << duration.count() << " ms" << std::endl;
+                }
+                // 移除已执行的部分
+                accumulated_sql = accumulated_sql.substr(semicolon_pos + 1);
+                accumulated_sql = TrimWhitespace(accumulated_sql);
+                // 查找下一个分号
+                semicolon_pos = accumulated_sql.find(';');
+                // 如果还有剩余的SQL，重置为续行状态，否则重置为新语句状态
+                is_first_line = accumulated_sql.empty();
+            }
         }
         std::cout << "Shutting down..." << std::endl;
         Shutdown();
     }
    private:
+    // 去除字符串首尾空白字符
+    std::string TrimWhitespace(const std::string& str) {
+        const std::string whitespace = " \t\n\r";
+        size_t start = str.find_first_not_of(whitespace);
+        if (start == std::string::npos) {
+            return "";
+        }
+        size_t end = str.find_last_not_of(whitespace);
+        return str.substr(start, end - start + 1);
+    }
     void ExecuteSQL(const std::string& sql) {
         try {
             // Parse SQL
@@ -9961,6 +10008,7 @@ class SeqScanExecutor : public Executor {
    private:
     TableInfo* table_info_;
     TableHeap::Iterator table_iterator_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
 };
 // Insert executor
 class InsertExecutor : public Executor {
@@ -9979,8 +10027,9 @@ class InsertExecutor : public Executor {
 };
 // Update executor
 class UpdateExecutor : public Executor {
-public:
-    UpdateExecutor(ExecutorContext* exec_ctx, std::unique_ptr<UpdatePlanNode> plan);
+   public:
+    UpdateExecutor(ExecutorContext* exec_ctx,
+                   std::unique_ptr<UpdatePlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
     // 获取具体类型的计划节点
@@ -9988,10 +10037,10 @@ public:
         return static_cast<UpdatePlanNode*>(plan_.get());
     }
     // 获取表的schema（用于操作数据）
-    const Schema* GetTableSchema() const { 
-        return table_info_ ? table_info_->schema.get() : nullptr; 
+    const Schema* GetTableSchema() const {
+        return table_info_ ? table_info_->schema.get() : nullptr;
     }
-private:
+   private:
     TableInfo* table_info_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
     std::vector<RID> target_rids_;  // 需要更新的记录RID列表
@@ -10000,8 +10049,9 @@ private:
 };
 // Delete executor
 class DeleteExecutor : public Executor {
-public:
-    DeleteExecutor(ExecutorContext* exec_ctx, std::unique_ptr<DeletePlanNode> plan);
+   public:
+    DeleteExecutor(ExecutorContext* exec_ctx,
+                   std::unique_ptr<DeletePlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
     // 获取具体类型的计划节点
@@ -10009,10 +10059,10 @@ public:
         return static_cast<DeletePlanNode*>(plan_.get());
     }
     // 获取表的schema（用于操作数据）
-    const Schema* GetTableSchema() const { 
-        return table_info_ ? table_info_->schema.get() : nullptr; 
+    const Schema* GetTableSchema() const {
+        return table_info_ ? table_info_->schema.get() : nullptr;
     }
-private:
+   private:
     TableInfo* table_info_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
     std::vector<RID> target_rids_;  // 需要删除的记录RID列表
@@ -10021,14 +10071,15 @@ private:
 };
 // Projection executor
 class ProjectionExecutor : public Executor {
-public:
-    ProjectionExecutor(ExecutorContext* exec_ctx, std::unique_ptr<ProjectionPlanNode> plan);
+   public:
+    ProjectionExecutor(ExecutorContext* exec_ctx,
+                       std::unique_ptr<ProjectionPlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
     ProjectionPlanNode* GetProjectionPlan() const {
         return static_cast<ProjectionPlanNode*>(plan_.get());
     }
-private:
+   private:
     std::unique_ptr<Executor> child_executor_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
 };

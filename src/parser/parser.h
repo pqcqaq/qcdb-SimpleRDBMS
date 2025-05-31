@@ -46,6 +46,7 @@ class Parser {
     std::unique_ptr<Statement> ParseBeginStatement();
     std::unique_ptr<Statement> ParseCommitStatement();
     std::unique_ptr<Statement> ParseRollbackStatement();
+    std::unique_ptr<Statement> ParseExplainStatement();
 
     // Helper functions
     std::vector<Column> ParseColumnDefinitions();

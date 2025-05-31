@@ -48,6 +48,9 @@ class ExecutionEngine {
     bool HandleBegin(Transaction* txn);
     bool HandleCommit(Transaction* txn);
     bool HandleRollback(Transaction* txn);
+    bool HandleExplain(ExplainStatement* stmt, std::vector<Tuple>* result_set);
+    std::string FormatExecutionPlan(PlanNode* plan, int indent = 0);
+    std::string GetPlanNodeTypeString(PlanNodeType type);
 
     std::string TypeIdToString(TypeId type_id) {
         switch (type_id) {

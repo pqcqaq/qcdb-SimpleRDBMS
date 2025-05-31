@@ -66,6 +66,11 @@ bool ExecutionEngine::Execute(Statement* statement,
         case Statement::StmtType::ROLLBACK_TXN: {
             return HandleRollback(txn);
         }
+        case Statement::StmtType::EXPLAIN: {
+            LOG_DEBUG("ExecutionEngine::Execute: Handling EXPLAIN");
+            auto* explain_stmt = static_cast<ExplainStatement*>(statement);
+            return HandleExplain(explain_stmt, result_set);
+        }
         default:
             LOG_DEBUG(
                 "ExecutionEngine::Execute: Handling DML statement, creating "
@@ -232,16 +237,19 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
     }
 }
 
-std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stmt) {
+std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
+    SelectStatement* stmt) {
     if (!stmt) {
         LOG_ERROR("CreateSelectPlan: SelectStatement is null");
         return nullptr;
     }
-    
-    LOG_DEBUG("CreateSelectPlan: Creating plan for table " << stmt->GetTableName());
+
+    LOG_DEBUG("CreateSelectPlan: Creating plan for table "
+              << stmt->GetTableName());
     TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
     if (!table_info) {
-        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName() << "' not found in catalog");
+        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName()
+                                              << "' not found in catalog");
         return nullptr;
     }
 
@@ -249,14 +257,16 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stm
     const auto& select_list = stmt->GetSelectList();
     bool is_select_all = false;
     if (select_list.size() == 1) {
-        auto* col_ref = dynamic_cast<ColumnRefExpression*>(select_list[0].get());
+        auto* col_ref =
+            dynamic_cast<ColumnRefExpression*>(select_list[0].get());
         if (col_ref && col_ref->GetColumnName() == "*") {
             is_select_all = true;
         }
     }
 
-    LOG_DEBUG("CreateSelectPlan: Found table " << stmt->GetTableName() 
-              << " with schema containing " << table_info->schema->GetColumnCount() << " columns");
+    LOG_DEBUG("CreateSelectPlan: Found table "
+              << stmt->GetTableName() << " with schema containing "
+              << table_info->schema->GetColumnCount() << " columns");
 
     // 克隆 WHERE 子句（重要！）
     auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
@@ -264,7 +274,7 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stm
     auto seq_scan_plan = std::make_unique<SeqScanPlanNode>(
         table_info->schema.get(),  // SeqScan 使用完整的表 schema
         stmt->GetTableName(),
-        std::move(where_copy)      // 传递WHERE子句而不是nullptr
+        std::move(where_copy)  // 传递WHERE子句而不是nullptr
     );
 
     if (is_select_all) {
@@ -277,9 +287,11 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stm
             if (col_ref) {
                 const std::string& col_name = col_ref->GetColumnName();
                 if (table_info->schema->HasColumn(col_name)) {
-                    selected_columns.push_back(table_info->schema->GetColumn(col_name));
+                    selected_columns.push_back(
+                        table_info->schema->GetColumn(col_name));
                 } else {
-                    LOG_ERROR("CreateSelectPlan: Column '" << col_name << "' not found in table");
+                    LOG_ERROR("CreateSelectPlan: Column '"
+                              << col_name << "' not found in table");
                     return nullptr;
                 }
             }
@@ -298,7 +310,7 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stm
         // 创建投影计划节点，并转移schema的所有权
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
             output_schema, std::move(expressions), std::move(seq_scan_plan));
-        
+
         // 将schema存储在投影计划中
         projection_plan->SetOwnedSchema(std::move(projection_schema));
         return std::move(projection_plan);
@@ -399,6 +411,132 @@ bool ExecutionEngine::HandleRollback(Transaction* txn) {
     // 这里可以记录日志或执行其他必要操作
     LOG_DEBUG("ROLLBACK transaction executed");
     return true;
+}
+
+bool ExecutionEngine::HandleExplain(ExplainStatement* stmt,
+                                    std::vector<Tuple>* result_set) {
+    // 获取要解释的语句
+    Statement* inner_stmt = stmt->GetStatement();
+
+    // 创建执行计划
+    auto plan = CreatePlan(inner_stmt);
+    if (!plan) {
+        LOG_ERROR("HandleExplain: Failed to create plan");
+        return false;
+    }
+
+    // 格式化执行计划
+    std::string plan_text = FormatExecutionPlan(plan.get());
+
+    // 创建结果schema（只有一个字符串列）
+    std::vector<Column> columns = {
+        {"QUERY PLAN", TypeId::VARCHAR, 1000, false, false}};
+    Schema result_schema(columns);
+
+    // 将计划文本按行分割并加入结果集
+    std::istringstream iss(plan_text);
+    std::string line;
+    while (std::getline(iss, line)) {
+        std::vector<Value> values = {Value(line)};
+        Tuple tuple(values, &result_schema);
+        result_set->push_back(tuple);
+    }
+
+    return true;
+}
+
+std::string ExecutionEngine::FormatExecutionPlan(PlanNode* plan, int indent) {
+    std::ostringstream oss;
+
+    // 添加缩进
+    for (int i = 0; i < indent; i++) {
+        oss << "  ";
+    }
+
+    // 添加节点类型
+    oss << "-> " << GetPlanNodeTypeString(plan->GetType());
+
+    // 添加节点特定信息
+    switch (plan->GetType()) {
+        case PlanNodeType::SEQUENTIAL_SCAN: {
+            auto* seq_scan = static_cast<SeqScanPlanNode*>(plan);
+            oss << " on " << seq_scan->GetTableName();
+            if (seq_scan->GetPredicate()) {
+                oss << " (Filter: WHERE clause)";
+            }
+            break;
+        }
+        case PlanNodeType::INSERT: {
+            auto* insert_plan = static_cast<InsertPlanNode*>(plan);
+            oss << " into " << insert_plan->GetTableName();
+            oss << " (" << insert_plan->GetValues().size() << " rows)";
+            break;
+        }
+        case PlanNodeType::UPDATE: {
+            auto* update_plan = static_cast<UpdatePlanNode*>(plan);
+            oss << " on " << update_plan->GetTableName();
+            if (update_plan->GetPredicate()) {
+                oss << " (Filter: WHERE clause)";
+            }
+            break;
+        }
+        case PlanNodeType::DELETE: {
+            auto* delete_plan = static_cast<DeletePlanNode*>(plan);
+            oss << " from " << delete_plan->GetTableName();
+            if (delete_plan->GetPredicate()) {
+                oss << " (Filter: WHERE clause)";
+            }
+            break;
+        }
+        case PlanNodeType::PROJECTION: {
+            auto* proj_plan = static_cast<ProjectionPlanNode*>(plan);
+            oss << " (" << proj_plan->GetExpressions().size() << " columns)";
+            break;
+        }
+        default:
+            break;
+    }
+
+    oss << "\n";
+
+    // 递归处理子节点
+    const auto& children = plan->GetChildren();
+    for (const auto& child : children) {
+        oss << FormatExecutionPlan(child.get(), indent + 1);
+    }
+
+    return oss.str();
+}
+
+std::string ExecutionEngine::GetPlanNodeTypeString(PlanNodeType type) {
+    switch (type) {
+        case PlanNodeType::SEQUENTIAL_SCAN:
+            return "Seq Scan";
+        case PlanNodeType::INDEX_SCAN:
+            return "Index Scan";
+        case PlanNodeType::INSERT:
+            return "Insert";
+        case PlanNodeType::UPDATE:
+            return "Update";
+        case PlanNodeType::DELETE:
+            return "Delete";
+        case PlanNodeType::PROJECTION:
+            return "Projection";
+        case PlanNodeType::FILTER:
+            return "Filter";
+        case PlanNodeType::NESTED_LOOP_JOIN:
+            return "Nested Loop Join";
+        case PlanNodeType::HASH_JOIN:
+            return "Hash Join";
+        case PlanNodeType::AGGREGATION:
+            return "Aggregation";
+        case PlanNodeType::SORT:
+            return "Sort";
+        case PlanNodeType::LIMIT:
+            return "Limit";
+        default:
+            return "Unknown";
+    }
 }
 
 }  // namespace SimpleRDBMS
