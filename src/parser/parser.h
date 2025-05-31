@@ -35,9 +35,12 @@ class Parser {
     std::unique_ptr<Expression> ParseOrExpression();
     std::unique_ptr<Expression> ParseAndExpression();
     std::unique_ptr<Expression> ParseComparisonExpression();
+    std::unique_ptr<Expression> ParseArithmeticExpression();
+    std::unique_ptr<Expression> ParseTermExpression();
 
     std::unique_ptr<Statement> ParseUpdateStatement();
     std::unique_ptr<Statement> ParseDeleteStatement();
+    std::unique_ptr<Expression> ParseUnaryExpression();
 
     // Helper functions
     std::vector<Column> ParseColumnDefinitions();

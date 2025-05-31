@@ -103,4 +103,47 @@ private:
     std::vector<std::unique_ptr<Expression>> expressions_;
 };
 
+class UpdatePlanNode : public PlanNode {
+public:
+    UpdatePlanNode(const Schema* output_schema,
+                   const std::string& table_name,
+                   std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates,
+                   std::unique_ptr<Expression> predicate = nullptr)
+        : PlanNode(output_schema, {}),
+          table_name_(table_name),
+          updates_(std::move(updates)),
+          predicate_(std::move(predicate)) {}
+    
+    PlanNodeType GetType() const override { return PlanNodeType::UPDATE; }
+    
+    const std::string& GetTableName() const { return table_name_; }
+    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& GetUpdates() const { return updates_; }
+    Expression* GetPredicate() const { return predicate_.get(); }
+
+private:
+    std::string table_name_;
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates_;
+    std::unique_ptr<Expression> predicate_;
+};
+
+// Delete plan node
+class DeletePlanNode : public PlanNode {
+public:
+    DeletePlanNode(const Schema* output_schema,
+                   const std::string& table_name,
+                   std::unique_ptr<Expression> predicate = nullptr)
+        : PlanNode(output_schema, {}),
+          table_name_(table_name),
+          predicate_(std::move(predicate)) {}
+    
+    PlanNodeType GetType() const override { return PlanNodeType::DELETE; }
+    
+    const std::string& GetTableName() const { return table_name_; }
+    Expression* GetPredicate() const { return predicate_.get(); }
+
+private:
+    std::string table_name_;
+    std::unique_ptr<Expression> predicate_;
+};
+
 }  // namespace SimpleRDBMS

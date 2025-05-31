@@ -12,19 +12,15 @@ enum class TokenType {
     CREATE, TABLE, DROP, INDEX, ON, PRIMARY, KEY, NOT, _NULL,
     INT, VARCHAR, FLOAT, DOUBLE, BOOLEAN,
     AND, OR,
-    
     // Operators
     EQUALS, NOT_EQUALS, LESS_THAN, GREATER_THAN, LESS_EQUALS, GREATER_EQUALS,
-    
+    PLUS, MINUS, MULTIPLY, DIVIDE,  // 添加算术运算符
     // Literals
     INTEGER_LITERAL, FLOAT_LITERAL, STRING_LITERAL, BOOLEAN_LITERAL,
-    
     // Identifiers
     IDENTIFIER,
-    
     // Punctuation
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR,
-    
     // Special
     EOF_TOKEN, INVALID
 };

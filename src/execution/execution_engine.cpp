@@ -2,6 +2,8 @@
 #include "execution/executor.h"
 #include "parser/ast.h"
 #include "catalog/table_manager.h"
+#include "execution/expression_cloner.h"
+#include "common/exception.h"
 
 namespace SimpleRDBMS {
 
@@ -40,12 +42,6 @@ bool ExecutionEngine::Execute(Statement* statement, std::vector<Tuple>* result_s
             auto* drop_idx_stmt = static_cast<DropIndexStatement*>(statement);
             return table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
         }
-        case Statement::StmtType::UPDATE:
-            // 临时返回false，表示未实现
-            return false;
-        case Statement::StmtType::DELETE:
-            // 临时返回false，表示未实现  
-            return false;
         default:
             // For DML statements, create plan and executor
             break;
@@ -73,6 +69,7 @@ bool ExecutionEngine::Execute(Statement* statement, std::vector<Tuple>* result_s
     return true;
 }
 
+
 std::unique_ptr<PlanNode> ExecutionEngine::CreatePlan(Statement* statement) {
     if (!statement) {
         return nullptr;
@@ -83,9 +80,64 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreatePlan(Statement* statement) {
             return CreateSelectPlan(static_cast<SelectStatement*>(statement));
         case Statement::StmtType::INSERT:
             return CreateInsertPlan(static_cast<InsertStatement*>(statement));
+        case Statement::StmtType::UPDATE:
+            return CreateUpdatePlan(static_cast<UpdateStatement*>(statement));
+        case Statement::StmtType::DELETE:
+            return CreateDeletePlan(static_cast<DeleteStatement*>(statement));
         default:
             return nullptr;
     }
+}
+
+std::unique_ptr<PlanNode> ExecutionEngine::CreateUpdatePlan(UpdateStatement* stmt) {
+    if (!stmt) {
+        return nullptr;
+    }
+    
+    TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
+    if (!table_info) {
+        return nullptr;
+    }
+    
+    // 使用表达式克隆器来拷贝更新表达式
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates;
+    for (const auto& clause : stmt->GetUpdateClauses()) {
+        auto cloned_expr = ExpressionCloner::Clone(clause.value.get());
+        if (!cloned_expr) {
+            throw ExecutionException("Failed to clone update expression");
+        }
+        updates.emplace_back(clause.column_name, std::move(cloned_expr));
+    }
+    
+    // 克隆 WHERE 子句
+    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+    
+    return std::make_unique<UpdatePlanNode>(
+        table_info->schema.get(),
+        stmt->GetTableName(),
+        std::move(updates),
+        std::move(where_copy)
+    );
+}
+
+std::unique_ptr<PlanNode> ExecutionEngine::CreateDeletePlan(DeleteStatement* stmt) {
+    if (!stmt) {
+        return nullptr;
+    }
+    
+    TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
+    if (!table_info) {
+        return nullptr;
+    }
+    
+    // 克隆 WHERE 子句
+    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
+    
+    return std::make_unique<DeletePlanNode>(
+        table_info->schema.get(),
+        stmt->GetTableName(),
+        std::move(where_copy)
+    );
 }
 
 std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(ExecutorContext* exec_ctx, 
@@ -104,6 +156,16 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(ExecutorContext* exec_
             auto insert_plan = static_cast<InsertPlanNode*>(plan.release());
             return std::make_unique<InsertExecutor>(exec_ctx, 
                 std::unique_ptr<InsertPlanNode>(insert_plan));
+        }
+        case PlanNodeType::UPDATE: {
+            auto update_plan = static_cast<UpdatePlanNode*>(plan.release());
+            return std::make_unique<UpdateExecutor>(exec_ctx, 
+                std::unique_ptr<UpdatePlanNode>(update_plan));
+        }
+        case PlanNodeType::DELETE: {
+            auto delete_plan = static_cast<DeletePlanNode*>(plan.release());
+            return std::make_unique<DeleteExecutor>(exec_ctx, 
+                std::unique_ptr<DeletePlanNode>(delete_plan));
         }
         default:
             return nullptr;

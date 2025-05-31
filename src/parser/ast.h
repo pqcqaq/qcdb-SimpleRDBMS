@@ -186,7 +186,7 @@ class DropIndexStatement : public Statement {
 };
 
 class BinaryOpExpression : public Expression {
-public:
+   public:
     enum class OpType {
         EQUALS,
         NOT_EQUALS,
@@ -195,40 +195,113 @@ public:
         LESS_EQUALS,
         GREATER_EQUALS,
         AND,
-        OR
+        OR,
+        PLUS,      // 添加算术运算符
+        MINUS,
+        MULTIPLY,
+        DIVIDE
     };
-    
-    BinaryOpExpression(std::unique_ptr<Expression> left,
-                       OpType op,
+
+    BinaryOpExpression(std::unique_ptr<Expression> left, OpType op,
                        std::unique_ptr<Expression> right)
         : left_(std::move(left)), op_(op), right_(std::move(right)) {}
-    
+
     ExprType GetType() const override { return ExprType::BINARY_OP; }
     void Accept(ASTVisitor* visitor) override;
-    
+
     Expression* GetLeft() const { return left_.get(); }
     Expression* GetRight() const { return right_.get(); }
     OpType GetOperator() const { return op_; }
 
-private:
+   private:
     std::unique_ptr<Expression> left_;
     OpType op_;
     std::unique_ptr<Expression> right_;
 };
 
+struct UpdateClause {
+    std::string column_name;
+    std::unique_ptr<Expression> value;
+
+    UpdateClause(const std::string& col, std::unique_ptr<Expression> val)
+        : column_name(col), value(std::move(val)) {}
+};
+
+class UpdateStatement : public Statement {
+   public:
+    UpdateStatement(const std::string& table_name,
+                    std::vector<UpdateClause> update_clauses,
+                    std::unique_ptr<Expression> where_clause = nullptr)
+        : table_name_(table_name),
+          update_clauses_(std::move(update_clauses)),
+          where_clause_(std::move(where_clause)) {}
+
+    StmtType GetType() const override { return StmtType::UPDATE; }
+    void Accept(ASTVisitor* visitor) override;
+
+    const std::string& GetTableName() const { return table_name_; }
+    const std::vector<UpdateClause>& GetUpdateClauses() const {
+        return update_clauses_;
+    }
+    Expression* GetWhereClause() const { return where_clause_.get(); }
+
+   private:
+    std::string table_name_;
+    std::vector<UpdateClause> update_clauses_;
+    std::unique_ptr<Expression> where_clause_;
+};
+
+class DeleteStatement : public Statement {
+   public:
+    DeleteStatement(const std::string& table_name,
+                    std::unique_ptr<Expression> where_clause = nullptr)
+        : table_name_(table_name), where_clause_(std::move(where_clause)) {}
+
+    StmtType GetType() const override { return StmtType::DELETE; }
+    void Accept(ASTVisitor* visitor) override;
+
+    const std::string& GetTableName() const { return table_name_; }
+    Expression* GetWhereClause() const { return where_clause_.get(); }
+
+   private:
+    std::string table_name_;
+    std::unique_ptr<Expression> where_clause_;
+};
+
+class UnaryOpExpression : public Expression {
+   public:
+    enum class OpType { NOT, NEGATIVE };
+
+    UnaryOpExpression(OpType op, std::unique_ptr<Expression> operand)
+        : op_(op), operand_(std::move(operand)) {}
+
+    ExprType GetType() const override { return ExprType::UNARY_OP; }
+    void Accept(ASTVisitor* visitor) override;
+
+    OpType GetOperator() const { return op_; }
+    Expression* GetOperand() const { return operand_.get(); }
+
+   private:
+    OpType op_;
+    std::unique_ptr<Expression> operand_;
+};
+
 // Visitor pattern for AST traversal
 class ASTVisitor {
-   public:
+public:
     virtual ~ASTVisitor() = default;
     virtual void Visit(ConstantExpression* expr) = 0;
     virtual void Visit(ColumnRefExpression* expr) = 0;
+    virtual void Visit(BinaryOpExpression* expr) = 0;
+    virtual void Visit(UnaryOpExpression* expr) = 0;
     virtual void Visit(SelectStatement* stmt) = 0;
-    virtual void Visit(CreateTableStatement* stmt) = 0;
     virtual void Visit(InsertStatement* stmt) = 0;
+    virtual void Visit(UpdateStatement* stmt) = 0;
+    virtual void Visit(DeleteStatement* stmt) = 0;
+    virtual void Visit(CreateTableStatement* stmt) = 0;
     virtual void Visit(DropTableStatement* stmt) = 0;
     virtual void Visit(CreateIndexStatement* stmt) = 0;
     virtual void Visit(DropIndexStatement* stmt) = 0;
-    virtual void Visit(BinaryOpExpression* expr) = 0;
 };
 
 }  // namespace SimpleRDBMS

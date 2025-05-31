@@ -1,5 +1,6 @@
 #include "record/tuple.h"
 #include <cstring>
+#include <stdexcept>
 
 namespace SimpleRDBMS {
 
@@ -37,10 +38,6 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 break;
         }
     }
-}
-
-Value Tuple::GetValue(size_t index) const {
-    return values_[index];
 }
 
 void Tuple::SerializeTo(char* data) const {
@@ -167,6 +164,13 @@ void Tuple::DeserializeFrom(const char* data, const Schema* schema) {
 
 size_t Tuple::GetSerializedSize() const {
     return serialized_size_;
+}
+
+Value Tuple::GetValue(size_t index) const {
+    if (index >= values_.size()) {
+        throw std::out_of_range("Index out of range");
+    }
+    return values_[index];
 }
 
 }  // namespace SimpleRDBMS

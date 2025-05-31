@@ -7,6 +7,7 @@
 #include "execution/plan_node.h"
 #include "record/tuple.h"
 #include "transaction/transaction.h"
+#include "execution/expression_evaluator.h"
 
 namespace SimpleRDBMS {
 
@@ -17,6 +18,8 @@ class SeqScanPlanNode;
 class InsertPlanNode;
 class TableInfo;
 class TableHeap;
+class UpdatePlanNode;
+class DeletePlanNode;
 
 // Executor context (moved before Executor class)
 class ExecutorContext {
@@ -95,6 +98,47 @@ class InsertExecutor : public Executor {
    private:
     TableInfo* table_info_;
     size_t current_index_;
+};
+// Update executor
+class UpdateExecutor : public Executor {
+public:
+    UpdateExecutor(ExecutorContext* exec_ctx, std::unique_ptr<UpdatePlanNode> plan);
+    
+    void Init() override;
+    bool Next(Tuple* tuple, RID* rid) override;
+    
+    // 获取具体类型的计划节点
+    UpdatePlanNode* GetUpdatePlan() const {
+        return static_cast<UpdatePlanNode*>(plan_.get());
+    }
+
+private:
+    TableInfo* table_info_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
+    std::vector<RID> target_rids_;  // 需要更新的记录RID列表
+    size_t current_index_;
+    bool is_executed_;
+};
+
+// Delete executor
+class DeleteExecutor : public Executor {
+public:
+    DeleteExecutor(ExecutorContext* exec_ctx, std::unique_ptr<DeletePlanNode> plan);
+    
+    void Init() override;
+    bool Next(Tuple* tuple, RID* rid) override;
+    
+    // 获取具体类型的计划节点
+    DeletePlanNode* GetDeletePlan() const {
+        return static_cast<DeletePlanNode*>(plan_.get());
+    }
+
+private:
+    TableInfo* table_info_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
+    std::vector<RID> target_rids_;  // 需要删除的记录RID列表
+    size_t current_index_;
+    bool is_executed_;
 };
 
 }  // namespace SimpleRDBMS
