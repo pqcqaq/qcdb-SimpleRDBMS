@@ -390,9 +390,9 @@ make test_main
 
 ## 📞 联系方式
 
-- **项目维护者**：[您的姓名]
-- **邮箱**：your.email@example.com
-- **项目主页**：https://github.com/your-username/SimpleRDBMS
+- **项目维护者**：[PQCQAQ]
+- **邮箱**：1220204124@zust.edu.cn
+- **项目主页**：https://github.com/pqcqaq/qcdb-SimpleRDBMS
 
 ---
 
