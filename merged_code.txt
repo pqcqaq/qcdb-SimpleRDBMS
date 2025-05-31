@@ -3367,7 +3367,16 @@ class SimpleRDBMSServer {
             if (line.empty()) {
                 continue;
             }
+            // 开始时间
+            auto start_time = std::chrono::high_resolution_clock::now();
             ExecuteSQL(line);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            // 计算并输出执行时间
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    end_time - start_time);
+            std::cout << "Query executed in " << duration.count() << " ms"
+                      << std::endl;
         }
         std::cout << "Shutting down..." << std::endl;
         Shutdown();
