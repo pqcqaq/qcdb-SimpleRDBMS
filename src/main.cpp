@@ -2,6 +2,10 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <sstream>
+#include <algorithm>
+#include <iomanip>
+#include <chrono>
 
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
@@ -54,34 +58,91 @@ class SimpleRDBMSServer {
     void Run() {
         std::cout << "SimpleRDBMS Server Started!" << std::endl;
         std::cout << "Enter SQL commands (type 'exit' to quit):" << std::endl;
+        std::cout << "Note: SQL statements must end with ';'" << std::endl;
+        
+        std::string accumulated_sql;
         std::string line;
+        bool is_first_line = true;
+        
         while (true) {
-            std::cout << "SimpleRDBMS> ";
+            // 显示提示符
+            if (is_first_line) {
+                std::cout << "SimpleRDBMS> ";
+                is_first_line = false;
+            } else {
+                std::cout << "          -> ";  // 续行提示符
+            }
+            
             if (!std::getline(std::cin, line)) {
+                break;  // EOF
+            }
+            
+            // 去除行首尾空白
+            line = TrimWhitespace(line);
+            
+            // 检查退出命令（只有在新语句开始时才检查）
+            if (accumulated_sql.empty() && (line == "exit" || line == "quit")) {
                 break;
             }
-            if (line == "exit" || line == "quit") {
-                break;
-            }
-            if (line.empty()) {
+            
+            // 如果是空行且没有累积的SQL，继续
+            if (line.empty() && accumulated_sql.empty()) {
+                is_first_line = true;
                 continue;
             }
-            // 开始时间
-            auto start_time = std::chrono::high_resolution_clock::now();
-            ExecuteSQL(line);
-            auto end_time = std::chrono::high_resolution_clock::now();
-            // 计算并输出执行时间
-            auto duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time);
-            std::cout << "Query executed in " << duration.count() << " ms"
-                      << std::endl;
+            
+            // 将当前行添加到累积的SQL中
+            if (!accumulated_sql.empty()) {
+                accumulated_sql += " ";  // 在行之间添加空格
+            }
+            accumulated_sql += line;
+            
+            // 检查是否包含分号
+            size_t semicolon_pos = accumulated_sql.find(';');
+            while (semicolon_pos != std::string::npos) {
+                // 提取到分号为止的SQL语句
+                std::string sql_to_execute = accumulated_sql.substr(0, semicolon_pos);
+                sql_to_execute = TrimWhitespace(sql_to_execute);
+                
+                // 执行SQL语句（如果不为空）
+                if (!sql_to_execute.empty()) {
+                    auto start_time = std::chrono::high_resolution_clock::now();
+                    ExecuteSQL(sql_to_execute);
+                    auto end_time = std::chrono::high_resolution_clock::now();
+                    
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        end_time - start_time);
+                    std::cout << "Query executed in " << duration.count() << " ms" << std::endl;
+                }
+                
+                // 移除已执行的部分
+                accumulated_sql = accumulated_sql.substr(semicolon_pos + 1);
+                accumulated_sql = TrimWhitespace(accumulated_sql);
+                
+                // 查找下一个分号
+                semicolon_pos = accumulated_sql.find(';');
+                
+                // 如果还有剩余的SQL，重置为续行状态，否则重置为新语句状态
+                is_first_line = accumulated_sql.empty();
+            }
         }
+        
         std::cout << "Shutting down..." << std::endl;
         Shutdown();
     }
 
    private:
+    // 去除字符串首尾空白字符
+    std::string TrimWhitespace(const std::string& str) {
+        const std::string whitespace = " \t\n\r";
+        size_t start = str.find_first_not_of(whitespace);
+        if (start == std::string::npos) {
+            return "";
+        }
+        size_t end = str.find_last_not_of(whitespace);
+        return str.substr(start, end - start + 1);
+    }
+
     void ExecuteSQL(const std::string& sql) {
         try {
             // Parse SQL
