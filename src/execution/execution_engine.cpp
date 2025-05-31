@@ -232,20 +232,16 @@ std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
     }
 }
 
-std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
-    SelectStatement* stmt) {
+std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(SelectStatement* stmt) {
     if (!stmt) {
         LOG_ERROR("CreateSelectPlan: SelectStatement is null");
         return nullptr;
     }
-
-    LOG_DEBUG("CreateSelectPlan: Creating plan for table "
-              << stmt->GetTableName());
-
+    
+    LOG_DEBUG("CreateSelectPlan: Creating plan for table " << stmt->GetTableName());
     TableInfo* table_info = catalog_->GetTable(stmt->GetTableName());
     if (!table_info) {
-        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName()
-                                              << "' not found in catalog");
+        LOG_ERROR("CreateSelectPlan: Table '" << stmt->GetTableName() << "' not found in catalog");
         return nullptr;
     }
 
@@ -253,21 +249,22 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
     const auto& select_list = stmt->GetSelectList();
     bool is_select_all = false;
     if (select_list.size() == 1) {
-        auto* col_ref =
-            dynamic_cast<ColumnRefExpression*>(select_list[0].get());
+        auto* col_ref = dynamic_cast<ColumnRefExpression*>(select_list[0].get());
         if (col_ref && col_ref->GetColumnName() == "*") {
             is_select_all = true;
         }
     }
 
-    LOG_DEBUG("CreateSelectPlan: Found table "
-              << stmt->GetTableName() << " with schema containing "
-              << table_info->schema->GetColumnCount() << " columns");
+    LOG_DEBUG("CreateSelectPlan: Found table " << stmt->GetTableName() 
+              << " with schema containing " << table_info->schema->GetColumnCount() << " columns");
+
+    // 克隆 WHERE 子句（重要！）
+    auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
 
     auto seq_scan_plan = std::make_unique<SeqScanPlanNode>(
         table_info->schema.get(),  // SeqScan 使用完整的表 schema
         stmt->GetTableName(),
-        nullptr  // WHERE clause will be handled later
+        std::move(where_copy)      // 传递WHERE子句而不是nullptr
     );
 
     if (is_select_all) {
@@ -280,11 +277,9 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
             if (col_ref) {
                 const std::string& col_name = col_ref->GetColumnName();
                 if (table_info->schema->HasColumn(col_name)) {
-                    selected_columns.push_back(
-                        table_info->schema->GetColumn(col_name));
+                    selected_columns.push_back(table_info->schema->GetColumn(col_name));
                 } else {
-                    LOG_ERROR("CreateSelectPlan: Column '"
-                              << col_name << "' not found in table");
+                    LOG_ERROR("CreateSelectPlan: Column '" << col_name << "' not found in table");
                     return nullptr;
                 }
             }
@@ -303,10 +298,9 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateSelectPlan(
         // 创建投影计划节点，并转移schema的所有权
         auto projection_plan = std::make_unique<ProjectionPlanNode>(
             output_schema, std::move(expressions), std::move(seq_scan_plan));
-
-        // 将schema存储在投影计划中（需要修改ProjectionPlanNode）
+        
+        // 将schema存储在投影计划中
         projection_plan->SetOwnedSchema(std::move(projection_schema));
-
         return std::move(projection_plan);
     }
 }

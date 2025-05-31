@@ -38,35 +38,44 @@ void SeqScanExecutor::Init() {
 
 bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
     auto* seq_scan_plan = GetSeqScanPlan();
-
-    if (!table_iterator_.IsEnd()) {
+    
+    // 创建表达式求值器（如果还没有）
+    if (!evaluator_ && seq_scan_plan->GetPredicate()) {
+        evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+    }
+    
+    while (!table_iterator_.IsEnd()) {
         try {
             LOG_DEBUG("SeqScanExecutor::Next: getting current tuple");
             // Get current tuple
             *tuple = *table_iterator_;
             *rid = tuple->GetRID();
-
             LOG_DEBUG("SeqScanExecutor::Next: got tuple with RID "
                       << rid->page_id << ":" << rid->slot_num);
-
+            
             // Move to next tuple for next call
             ++table_iterator_;
-
             LOG_DEBUG("SeqScanExecutor::Next: moved to next, IsEnd="
                       << table_iterator_.IsEnd());
-
+            
             // Apply predicate if exists
             Expression* predicate = seq_scan_plan->GetPredicate();
-            if (predicate == nullptr || true) {  // TODO: 实现谓词评估
-                return true;
+            if (predicate == nullptr) {
+                return true; // 没有WHERE条件，返回所有记录
             }
+            
+            // 求值WHERE条件
+            if (evaluator_->EvaluateAsBoolean(predicate, *tuple)) {
+                return true; // 满足WHERE条件
+            }
+            // 不满足条件，继续下一个tuple
+            
         } catch (const std::exception& e) {
-            LOG_ERROR(
-                "SeqScanExecutor::Next: Exception during scan: " << e.what());
+            LOG_ERROR("SeqScanExecutor::Next: Exception during scan: " << e.what());
             return false;
         }
     }
-
+    
     LOG_DEBUG("SeqScanExecutor::Next: iterator is at end");
     return false;
 }

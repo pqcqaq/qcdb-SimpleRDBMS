@@ -3,13 +3,12 @@
 #include <memory>
 
 #include "catalog/catalog.h"
-#include "execution/plan_node.h" 
+#include "execution/expression_evaluator.h"
+#include "execution/plan_node.h"
 #include "parser/ast.h"
 #include "record/table_heap.h"
 #include "record/tuple.h"
 #include "transaction/transaction.h"
-#include "execution/expression_evaluator.h"
-#include <memory>
 
 namespace SimpleRDBMS {
 
@@ -80,6 +79,7 @@ class SeqScanExecutor : public Executor {
    private:
     TableInfo* table_info_;
     TableHeap::Iterator table_iterator_;
+    std::unique_ptr<ExpressionEvaluator> evaluator_;
 };
 
 // Insert executor
@@ -102,22 +102,23 @@ class InsertExecutor : public Executor {
 };
 // Update executor
 class UpdateExecutor : public Executor {
-public:
-    UpdateExecutor(ExecutorContext* exec_ctx, std::unique_ptr<UpdatePlanNode> plan);
+   public:
+    UpdateExecutor(ExecutorContext* exec_ctx,
+                   std::unique_ptr<UpdatePlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
-    
+
     // 获取具体类型的计划节点
     UpdatePlanNode* GetUpdatePlan() const {
         return static_cast<UpdatePlanNode*>(plan_.get());
     }
-    
+
     // 获取表的schema（用于操作数据）
-    const Schema* GetTableSchema() const { 
-        return table_info_ ? table_info_->schema.get() : nullptr; 
+    const Schema* GetTableSchema() const {
+        return table_info_ ? table_info_->schema.get() : nullptr;
     }
-    
-private:
+
+   private:
     TableInfo* table_info_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
     std::vector<RID> target_rids_;  // 需要更新的记录RID列表
@@ -127,22 +128,23 @@ private:
 
 // Delete executor
 class DeleteExecutor : public Executor {
-public:
-    DeleteExecutor(ExecutorContext* exec_ctx, std::unique_ptr<DeletePlanNode> plan);
+   public:
+    DeleteExecutor(ExecutorContext* exec_ctx,
+                   std::unique_ptr<DeletePlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
-    
+
     // 获取具体类型的计划节点
     DeletePlanNode* GetDeletePlan() const {
         return static_cast<DeletePlanNode*>(plan_.get());
     }
-    
+
     // 获取表的schema（用于操作数据）
-    const Schema* GetTableSchema() const { 
-        return table_info_ ? table_info_->schema.get() : nullptr; 
+    const Schema* GetTableSchema() const {
+        return table_info_ ? table_info_->schema.get() : nullptr;
     }
-    
-private:
+
+   private:
     TableInfo* table_info_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
     std::vector<RID> target_rids_;  // 需要删除的记录RID列表
@@ -152,16 +154,17 @@ private:
 
 // Projection executor
 class ProjectionExecutor : public Executor {
-public:
-    ProjectionExecutor(ExecutorContext* exec_ctx, std::unique_ptr<ProjectionPlanNode> plan);
+   public:
+    ProjectionExecutor(ExecutorContext* exec_ctx,
+                       std::unique_ptr<ProjectionPlanNode> plan);
     void Init() override;
     bool Next(Tuple* tuple, RID* rid) override;
-    
+
     ProjectionPlanNode* GetProjectionPlan() const {
         return static_cast<ProjectionPlanNode*>(plan_.get());
     }
 
-private:
+   private:
     std::unique_ptr<Executor> child_executor_;
     std::unique_ptr<ExpressionEvaluator> evaluator_;
 };

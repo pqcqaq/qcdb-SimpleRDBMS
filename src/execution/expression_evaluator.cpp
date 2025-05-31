@@ -31,10 +31,14 @@ Value ExpressionEvaluator::Evaluate(const Expression* expr,
     }
 }
 
-bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr,
-                                            const Tuple& tuple) {
+bool ExpressionEvaluator::EvaluateAsBoolean(const Expression* expr, const Tuple& tuple) {
     Value result = Evaluate(expr, tuple);
-    return IsValueTrue(result);
+    bool bool_result = IsValueTrue(result);
+    
+    // 添加调试输出
+    LOG_DEBUG("EvaluateAsBoolean: result = " << bool_result);
+    
+    return bool_result;
 }
 
 Value ExpressionEvaluator::EvaluateConstant(const ConstantExpression* expr,
@@ -214,7 +218,7 @@ bool ExpressionEvaluator::CompareValues(const Value& left, const Value& right,
         }
     }
 
-    // 安全的数值类型转换
+    // 处理数值类型间的转换比较
     auto safe_to_double = [](const Value& val) -> std::pair<bool, double> {
         try {
             if (std::holds_alternative<int8_t>(val))
