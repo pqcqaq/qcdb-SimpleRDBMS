@@ -1,0 +1,317 @@
+# ====================
+# 编译产物
+# ====================
+
+# 可执行文件
+*.exe
+*.out
+*.app
+simpledb
+simple_rdbms
+test_main
+comprehensive_test
+bplus_tree_performance_test
+simple_bplus_test
+
+# 目标文件
+*.o
+*.obj
+*.lo
+*.slo
+*.ko
+
+# 静态库
+*.a
+*.lib
+*.la
+
+# 动态库
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# 预编译头文件
+*.gch
+*.pch
+
+# ====================
+# CMake 相关文件
+# ====================
+
+# CMake 生成的文件和目录
+build/
+Build/
+BUILD/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+
+# Ninja 构建文件
+.ninja_deps
+.ninja_log
+build.ninja
+
+# ====================
+# IDE 和编辑器文件
+# ====================
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# CLion
+.idea/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Qt Creator
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+
+# Eclipse
+.cproject
+.project
+.settings/
+
+# Code::Blocks
+*.cbp
+
+# Dev-C++
+*.dev
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+.*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ====================
+# 数据库和日志文件
+# ====================
+
+# 数据库文件（测试生成的）
+*.db
+*.sqlite
+*.sqlite3
+test*.db
+*_test.db
+simple_test.db
+catalog_test.db
+buffer_test.db
+index_test.db
+recovery_test.db
+transaction_test.db
+integration_test.db
+bplus_tree_test.db
+
+# 日志文件
+*.log
+*.log.*
+bplus_tree_test.log
+
+# ====================
+# 调试和分析文件
+# ====================
+
+# GDB 相关
+gdb.txt
+core
+core.*
+
+# Valgrind
+*.memcheck
+*.cachegrind
+*.callgrind
+*.massif
+*.helgrind
+*.drd
+
+# 性能分析
+gmon.out
+*.gcov
+*.gcda
+*.gcno
+lcov.info
+coverage.info
+
+# ASan/TSan/MSan 输出
+*.asan
+*.tsan
+*.msan
+
+# ====================
+# 操作系统相关文件
+# ====================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ====================
+# 临时文件和备份
+# ====================
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+*.save
+
+# Patch 文件
+*.patch
+*.diff
+*.rej
+
+# ====================
+# 文档和包管理
+# ====================
+
+# Doxygen 生成的文档
+doc/html/
+doc/latex/
+docs/html/
+docs/latex/
+
+# 包管理器文件
+conandata.txt
+conaninfo.txt
+conanbuildinfo.cmake
+conan.lock
+
+# vcpkg
+vcpkg_installed/
+
+# ====================
+# 测试和基准测试
+# ====================
+
+# 测试输出
+test_results/
+test_output/
+Testing/
+CTestTestfile.cmake
+
+# Google Test
+gtest/
+googletest/
+
+# 基准测试结果
+benchmark_results/
+*.benchmark
+
+# ====================
+# 其他
+# ====================
+
+# 压缩包
+*.zip
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tar.xz
+*.7z
+*.rar
+
+# 安装目录
+install/
+dist/
+
+# 缓存目录
+.cache/
+cache/
+
+# 锁文件
+*.lock
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# Node.js (如果有前端组件)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (如果有 Python 脚本)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 自定义忽略
+# 在这里添加项目特定的忽略规则
