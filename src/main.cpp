@@ -724,10 +724,6 @@ class SimpleRDBMSServer {
     void Shutdown() {
         // Create checkpoint
         recovery_manager_->Checkpoint();
-        // Flush all pages
-        buffer_pool_manager_->FlushAllPages();
-        // Flush logs
-        log_manager_->Flush();
     }
 
     // Storage components

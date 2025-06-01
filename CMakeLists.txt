@@ -99,6 +99,10 @@ target_link_libraries(index_manager_test simple_rdbms_core gtest)
 add_executable(test_log_recovery test/unit/test_log_recovery.cpp)
 target_link_libraries(test_log_recovery simple_rdbms_core gtest)
 
+# index_performance_test
+add_executable(index_performance_test test/unit/index_performance_test.cpp)
+target_link_libraries(index_performance_test simple_rdbms_core gtest)
+
 # 编译标志
 target_compile_options(simple_rdbms_core PRIVATE -Wall -Wextra)
 

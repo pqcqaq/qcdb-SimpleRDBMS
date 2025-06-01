@@ -121,7 +121,8 @@ bool ExecutionEngine::Execute(Statement* statement,
     Tuple tuple;
     RID rid;
     int tuple_count = 0;
-    const int MAX_TUPLES = 10000;
+    // 最多百万，这里是DEBUG用的，防止死循环
+    const int MAX_TUPLES = 1000000;
     
     // 添加超时保护
     auto start_time = std::chrono::steady_clock::now();
