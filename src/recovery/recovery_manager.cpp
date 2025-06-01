@@ -29,7 +29,53 @@ RecoveryManager::RecoveryManager(BufferPoolManager* buffer_pool_manager,
     : buffer_pool_manager_(buffer_pool_manager),
       catalog_(catalog),
       log_manager_(log_manager),
-      lock_manager_(lock_manager) {}
+      lock_manager_(lock_manager),
+      last_checkpoint_lsn_(INVALID_LSN) {}
+
+/**
+ * @brief 创建检查点并截断日志
+ *
+ * 该方法在创建检查点时执行以下操作：
+ * 1. 刷新所有脏页到磁盘
+ * 2. 刷新日志到磁盘
+ * 3. 获取当前LSN作为检查点LSN
+ * 4. 记录检查点信息到catalog
+ * 5. 截断日志文件，删除旧的日志记录
+ */
+void RecoveryManager::CheckpointWithLogTruncation() {
+    LOG_INFO("Starting checkpoint with log truncation");
+    
+    // 1. 刷新所有脏页到磁盘
+    buffer_pool_manager_->FlushAllPages();
+    
+    // 2. 刷新日志到磁盘
+    log_manager_->Flush();
+    
+    // 3. 获取当前LSN作为检查点LSN
+    lsn_t checkpoint_lsn = log_manager_->GetPersistentLSN();
+    
+    // 4. 记录检查点信息到catalog
+    try {
+        catalog_->SaveCatalogToDisk();
+        LOG_DEBUG("Catalog saved during checkpoint");
+    } catch (const std::exception& e) {
+        LOG_WARN("Failed to save catalog during checkpoint: " << e.what());
+    }
+    
+    // 5. 确保所有数据都已持久化后，截断日志文件
+    if (checkpoint_lsn > last_checkpoint_lsn_) {
+        log_manager_->TruncateLog(checkpoint_lsn);
+        last_checkpoint_lsn_ = checkpoint_lsn;
+        
+        LOG_INFO("Log truncated up to LSN " << checkpoint_lsn);
+        LOG_INFO("Log file size after truncation: " 
+                 << log_manager_->GetLogFileSize() << " bytes");
+    } else {
+        LOG_DEBUG("Skipping log truncation, no new persistent LSN");
+    }
+    
+    LOG_INFO("Checkpoint with log truncation completed");
+}
 
 /**
  * @brief 启动恢复过程，实现ARIES算法的三个阶段

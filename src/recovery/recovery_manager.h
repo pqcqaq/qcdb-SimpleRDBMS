@@ -63,12 +63,22 @@ class RecoveryManager {
      */
     void Checkpoint();
 
+    /**
+     * @brief 创建检查点并截断日志
+     *
+     * 在创建检查点后，截断日志文件，删除旧的日志记录
+     * 只保留从检查点开始的日志记录，以减少恢复时间
+     */
+    void CheckpointWithLogTruncation();
+
    private:
     // ====== 核心组件指针 ======
     BufferPoolManager* buffer_pool_manager_;  ///< 缓冲池管理器
     Catalog* catalog_;                        ///< 元数据管理器
     LogManager* log_manager_;                 ///< 日志管理器
     LockManager* lock_manager_;               ///< 锁管理器
+    lsn_t last_checkpoint_lsn_{
+        INVALID_LSN};  ///< 最后一个检查点的LSN，用于日志截断
 
     // ====== ARIES算法的数据结构 ======
 

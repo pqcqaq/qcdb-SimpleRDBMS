@@ -601,7 +601,7 @@ class SimpleRDBMSServer {
 
     void Shutdown() {
         // Create checkpoint
-        recovery_manager_->Checkpoint();
+        recovery_manager_->CheckpointWithLogTruncation();
     }
 
     // Storage components

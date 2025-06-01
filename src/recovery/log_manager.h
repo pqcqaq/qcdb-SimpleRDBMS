@@ -83,6 +83,24 @@ class LogManager {
      */
     void SetEnable(bool enable) { enable_logging_ = enable; }
 
+    /**
+     * 清理日志缓冲区
+     * @param checkpoint_lsn 检查点LSN，表示从此LSN开始的日志将被保留
+     */
+    void TruncateLog(lsn_t checkpoint_lsn);
+
+    /**
+     * 清除日志文件，释放所有日志页面
+     * 主要用于系统重启或清理操作
+     */
+    void ClearLogFile();
+
+    /**
+     * 获取当前日志文件大小
+     * @return 日志文件的总字节数
+     */
+    size_t GetLogFileSize();
+
    private:
     // ========== 核心组件 ==========
 
@@ -128,6 +146,11 @@ class LogManager {
 
     /** 当前正在使用的日志页面ID，用于跟踪日志文件增长 */
     page_id_t current_log_page_id_{0};
+
+    /** 日志页面ID列表，记录所有已写入的日志页面 */
+    std::vector<page_id_t> log_page_ids_;
+    /** 最后一个检查点LSN，用于日志截断和恢复 */
+    lsn_t last_checkpoint_lsn_{INVALID_LSN};
 
     // ========== 内部辅助方法 ==========
 

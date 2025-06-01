@@ -71,6 +71,21 @@ class PerformanceTestFixture : public ::testing::Test {
     long long ExecuteSQL(const std::string& sql) {
         auto start = std::chrono::high_resolution_clock::now();
 
+        // 每100个事务后检查是否需要清理日志
+        static std::atomic<int> commit_count{0};
+        if (++commit_count % 100 == 0 && log_manager_) {
+            size_t log_size = log_manager_->GetLogFileSize();
+            const size_t LOG_SIZE_THRESHOLD = 10 * 1024 * 1024;  // 10MB
+
+            if (log_size > LOG_SIZE_THRESHOLD) {
+                LOG_INFO("Log file size ("
+                         << log_size
+                         << " bytes) exceeds threshold, triggering checkpoint");
+                // 这里需要访问RecoveryManager，可能需要传递引用或者通过其他方式
+                recovery_manager_->CheckpointWithLogTruncation();
+            }
+        }
+
         try {
             Parser parser(sql);
             auto statement = parser.Parse();
@@ -524,8 +539,8 @@ TEST_F(PerformanceTestFixture, ComprehensivePerformanceTest) {
 
         if (i % 1000 == 0) {
             std::cout << "已插入: " << i << " (" << std::fixed
-                      << std::setprecision(1) << (100.0 * i / TEST_SIZE)
-                      << "%)" << std::endl;
+                      << std::setprecision(1) << (100.0 * i / TEST_SIZE) << "%)"
+                      << std::endl;
         }
     }
 

@@ -24,7 +24,8 @@ LogManager::LogManager(DiskManager* disk_manager)
     : disk_manager_(disk_manager),
       log_buffer_size_(PAGE_SIZE),
       log_buffer_offset_(0),
-      current_log_page_id_(0) {
+      current_log_page_id_(0),
+      last_checkpoint_lsn_(INVALID_LSN) {
     // 参数合法性检查
     if (disk_manager_ == nullptr) {
         throw std::invalid_argument("DiskManager cannot be null");
@@ -193,6 +194,9 @@ void LogManager::FlushLogBuffer() {
         // 通过disk_manager写入磁盘
         disk_manager_->WritePage(log_page_id, page_buffer);
 
+        // 记录日志页面ID
+        log_page_ids_.push_back(log_page_id);
+
         LOG_DEBUG("Log buffer flushed to page "
                   << log_page_id << ", bytes written: " << log_buffer_offset_);
 
@@ -207,6 +211,68 @@ void LogManager::FlushLogBuffer() {
         LOG_ERROR("Failed to flush log buffer: " << e.what());
         throw;
     }
+}
+
+/**
+ * 清空日志文件，通常在截断日志时调用
+ * 这将删除所有旧的日志记录，保留从指定LSN开始的记录
+ */
+void LogManager::TruncateLog(lsn_t checkpoint_lsn) {
+    std::unique_lock<std::mutex> lock(latch_);
+    
+    if (checkpoint_lsn <= last_checkpoint_lsn_) {
+        LOG_DEBUG("TruncateLog: checkpoint_lsn " << checkpoint_lsn 
+                  << " <= last_checkpoint_lsn " << last_checkpoint_lsn_ 
+                  << ", skipping truncation");
+        return;
+    }
+    
+    LOG_INFO("TruncateLog: Truncating log up to LSN " << checkpoint_lsn);
+    
+    // 先刷新当前缓冲区
+    if (log_buffer_offset_ > 0) {
+        FlushLogBuffer();
+    }
+    
+    // 清空日志文件
+    ClearLogFile();
+    
+    // 重置LSN跟踪
+    last_checkpoint_lsn_ = checkpoint_lsn;
+    log_page_ids_.clear();
+    
+    LOG_INFO("TruncateLog: Log truncation completed");
+}
+
+void LogManager::ClearLogFile() {
+    LOG_INFO("ClearLogFile: Clearing log file");
+    
+    // 释放所有日志页面
+    for (page_id_t page_id : log_page_ids_) {
+        try {
+            disk_manager_->DeallocatePage(page_id);
+            LOG_DEBUG("ClearLogFile: Deallocated log page " << page_id);
+        } catch (const std::exception& e) {
+            LOG_WARN("ClearLogFile: Failed to deallocate page " << page_id 
+                     << ": " << e.what());
+        }
+    }
+    
+    // 清空缓冲区
+    log_buffer_offset_ = 0;
+    memset(log_buffer_, 0, log_buffer_size_);
+    
+    // 重置页面跟踪
+    log_page_ids_.clear();
+    current_log_page_id_ = 0;
+    
+    LOG_INFO("ClearLogFile: Log file cleared, " << log_page_ids_.size() 
+             << " pages deallocated");
+}
+
+size_t LogManager::GetLogFileSize() {
+    std::unique_lock<std::mutex> lock(latch_);
+    return log_page_ids_.size() * PAGE_SIZE + log_buffer_offset_;
 }
 
 /**
