@@ -328,7 +328,7 @@ TEST_F(PerformanceTestFixture, InsertBaseDataTest) {
 
 // 测试3：插入100万订单数据
 TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
-    std::cout << "\n=== 插入10万订单数据测试 ===" << std::endl;
+    std::cout << "\n=== 插入100万订单数据测试 ===" << std::endl;
 
     // 先创建表和基础数据
     ExecuteSQL(
@@ -341,7 +341,7 @@ TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
     // 插入100万订单数据
     auto start = std::chrono::high_resolution_clock::now();
 
-    const int ORDER_COUNT = 100000;
+    const int ORDER_COUNT = 1000000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     std::uniform_int_distribution<> product_dis(1, 1000);
     std::uniform_int_distribution<> quantity_dis(1, 10);
@@ -361,7 +361,7 @@ TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
 
         ExecuteSQL(ss.str());
 
-        if (i % 10000 == 0) {
+        if (i % 100000 == 0) {
             std::cout << "已插入订单: " << i << " (" << std::fixed
                       << std::setprecision(1) << (100.0 * i / ORDER_COUNT)
                       << "%)" << std::endl;
@@ -387,7 +387,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithoutIndexTest) {
     ExecuteSQL(
         R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
-    const int TEST_ORDER_COUNT = 100000;
+    const int TEST_ORDER_COUNT = 1000000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     std::uniform_int_distribution<> product_dis(1, 1000);
     std::uniform_int_distribution<> quantity_dis(1, 10);
@@ -407,7 +407,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithoutIndexTest) {
            << std::setprecision(3) << discount_dis(rng_) << ");";
         ExecuteSQL(ss.str());
 
-        if (i % 10000 == 0) {
+        if (i % 100000 == 0) {
             std::cout << "已插入: " << i << std::endl;
         }
     }
@@ -439,7 +439,7 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
         R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入一些测试数据
-    const int TEST_COUNT = 100000;
+    const int TEST_COUNT = 1000000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     for (int i = 1; i <= TEST_COUNT; ++i) {
         std::stringstream ss;
@@ -448,7 +448,7 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
               "0.0);";
         ExecuteSQL(ss.str());
 
-        if (i % 10000 == 0) {
+        if (i % 100000 == 0) {
             std::cout << "已插入: " << i << " (" << std::fixed
                       << std::setprecision(1) << (100.0 * i / TEST_COUNT)
                       << "%)" << std::endl;
@@ -480,7 +480,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
         R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入测试数据
-    const int TEST_COUNT = 100000;
+    const int TEST_COUNT = 1000000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     for (int i = 1; i <= TEST_COUNT; ++i) {
         std::stringstream ss;
@@ -489,7 +489,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
               "0.0);";
         ExecuteSQL(ss.str());
 
-        if (i % 10000 == 0) {
+        if (i % 100000 == 0) {
             std::cout << "已插入: " << i << " (" << std::fixed
                       << std::setprecision(1) << (100.0 * i / TEST_COUNT)
                       << "%)" << std::endl;
