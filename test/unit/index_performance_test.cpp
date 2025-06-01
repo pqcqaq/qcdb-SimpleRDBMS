@@ -34,9 +34,9 @@ class PerformanceTestFixture : public ::testing::Test {
         // 初始化数据库组件
         disk_manager_ = std::make_unique<DiskManager>("test_perf.db");
         log_disk_manager_ = std::make_unique<DiskManager>("test_perf.db.log");
-        replacer_ = std::make_unique<LRUReplacer>(1000);  // 增大缓冲池
+        replacer_ = std::make_unique<LRUReplacer>(100);  // 增大缓冲池
         buffer_pool_manager_ = std::make_unique<BufferPoolManager>(
-            1000, std::move(disk_manager_), std::move(replacer_));
+            100, std::move(disk_manager_), std::move(replacer_));
 
         log_manager_ = std::make_unique<LogManager>(log_disk_manager_.get());
         lock_manager_ = std::make_unique<LockManager>();

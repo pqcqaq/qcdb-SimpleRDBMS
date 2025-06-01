@@ -25,6 +25,8 @@ Transaction::Transaction(txn_id_t txn_id, IsolationLevel isolation_level)
       prev_lsn_(INVALID_LSN) {
     // 初始化事务对象的时候，事务开始处于 GROWING
     // 状态（可获得锁、写操作还未提交）
+    txn_id_ = txn_id;
+    isolation_level_ = isolation_level;
 }
 
 /*

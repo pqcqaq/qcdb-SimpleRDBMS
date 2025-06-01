@@ -22,7 +22,9 @@ namespace SimpleRDBMS {
  */
 TransactionManager::TransactionManager(LockManager* lock_manager,
                                        LogManager* log_manager)
-    : lock_manager_(lock_manager), log_manager_(log_manager) {}
+    : lock_manager_(lock_manager), log_manager_(log_manager) {
+        next_txn_id_ = 0;  // 初始化事务 ID 计数器
+    }
 
 /**
  * 析构函数：
