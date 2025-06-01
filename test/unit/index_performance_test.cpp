@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-// 假设你的SimpleRDBMS头文件
 #include "buffer/buffer_pool_manager.h"
 #include "buffer/lru_replacer.h"
 #include "catalog/catalog.h"
@@ -366,7 +365,7 @@ TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
 TEST_F(PerformanceTestFixture, QueryPerformanceWithoutIndexTest) {
     std::cout << "\n=== 查询性能测试（无索引） ===" << std::endl;
 
-    // 准备数据（简化版本，插入10万条数据用于快速测试）
+    // 准备数据（简化版本，插入1万条数据用于快速测试）
     ExecuteSQL(
         R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
@@ -421,7 +420,7 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
         R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入一些测试数据
-    const int TEST_COUNT = 50000;
+    const int TEST_COUNT = 100000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     for (int i = 1; i <= TEST_COUNT; ++i) {
         std::stringstream ss;
@@ -455,7 +454,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
         R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入测试数据
-    const int TEST_COUNT = 50000;
+    const int TEST_COUNT = 100000;
     std::uniform_int_distribution<> user_dis(1, 10000);
     for (int i = 1; i <= TEST_COUNT; ++i) {
         std::stringstream ss;

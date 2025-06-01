@@ -33,7 +33,7 @@ inline DebugLevel GetDebugLevel() {
             int val = std::atoi(env);
             return static_cast<DebugLevel>(val);
         }
-        return DebugLevel::INFO;
+        return DebugLevel::WARN;
     }();
     return level;
 }
