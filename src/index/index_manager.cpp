@@ -1,4 +1,11 @@
-// src/index/index_manager.cpp
+/*
+ * 文件: index_manager.cpp
+ * 作者: QCQCQC
+ * 日期: 2025-6-1
+ * 描述:
+ * 索引管理器实现，负责B+树索引的创建、删除和操作管理，支持多种数据类型的索引
+ */
+
 #include "index/index_manager.h"
 
 #include "buffer/buffer_pool_manager.h"
@@ -18,16 +25,30 @@
 
 namespace SimpleRDBMS {
 
-// 索引类型枚举，用于标识索引的键类型
-enum class IndexKeyType { INVALID = 0, INT32, INT64, FLOAT, DOUBLE, STRING };
+/**
+ * 索引键类型枚举
+ * 用来标识B+树索引支持的不同数据类型
+ */
+enum class IndexKeyType {
+    INVALID = 0,  // 无效类型
+    INT32,        // 32位整数
+    INT64,        // 64位整数
+    FLOAT,        // 单精度浮点数
+    DOUBLE,       // 双精度浮点数
+    STRING        // 字符串类型
+};
 
-// 索引元信息，存储索引的类型和其他信息
+/**
+ * 索引元数据结构
+ * 保存每个索引的基本信息和B+树实例
+ */
 struct IndexMetadata {
-    IndexKeyType key_type;
-    std::string index_name;
-    std::string table_name;
-    std::vector<std::string> key_columns;
-    std::unique_ptr<void, std::function<void(void*)>> index_instance;
+    IndexKeyType key_type;                 // 索引键的数据类型
+    std::string index_name;                // 索引名称
+    std::string table_name;                // 对应的表名
+    std::vector<std::string> key_columns;  // 索引列名（目前只支持单列）
+    std::unique_ptr<void, std::function<void(void*)>>
+        index_instance;  // B+树实例指针
 
     IndexMetadata(IndexKeyType type, const std::string& idx_name,
                   const std::string& tbl_name,
@@ -39,6 +60,10 @@ struct IndexMetadata {
           index_instance(nullptr, [](void*) {}) {}
 };
 
+/**
+ * IndexManager的内部实现类
+ * 使用Pimpl模式隐藏实现细节，提供线程安全的索引管理
+ */
 class IndexManagerImpl {
    public:
     explicit IndexManagerImpl(BufferPoolManager* buffer_pool_manager,
@@ -51,10 +76,10 @@ class IndexManagerImpl {
         LOG_DEBUG("IndexManager: Destroying IndexManager with "
                   << indexes_.size() << " indexes");
 
-        // 安全地清理所有索引
+        // 安全地清理所有索引，防止析构时出现异常
         try {
             std::lock_guard<std::mutex> lock(latch_);
-            indexes_.clear();  // 这会调用每个索引的析构函数
+            indexes_.clear();  // 会自动调用每个索引的自定义删除器
         } catch (const std::exception& e) {
             LOG_ERROR(
                 "IndexManagerImpl::~IndexManagerImpl: Exception during "
@@ -69,7 +94,11 @@ class IndexManagerImpl {
         LOG_DEBUG("IndexManager: IndexManager destroyed successfully");
     }
 
-    // 根据列类型确定索引键类型
+    /**
+     * 根据表列的数据类型确定对应的索引键类型
+     * @param column 表列信息，包含数据类型
+     * @return 对应的IndexKeyType枚举值
+     */
     IndexKeyType DetermineKeyType(const Column& column) {
         switch (column.type) {
             case TypeId::INTEGER:
@@ -89,7 +118,15 @@ class IndexManagerImpl {
         }
     }
 
-    // 创建索引
+    /**
+     * 创建新的B+树索引
+     * 目前只支持单列索引，多列索引需要后续扩展
+     * @param index_name 索引名称
+     * @param table_name 表名
+     * @param key_columns 索引列名列表
+     * @param table_schema 表的schema信息
+     * @return 成功返回true，失败返回false
+     */
     bool CreateIndex(const std::string& index_name,
                      const std::string& table_name,
                      const std::vector<std::string>& key_columns,
@@ -99,21 +136,25 @@ class IndexManagerImpl {
                   << index_name << " on table " << table_name
                   << " (currently have " << indexes_.size() << " indexes)");
 
+        // 检查索引是否已存在
         if (indexes_.find(index_name) != indexes_.end()) {
             LOG_WARN("IndexManager: Index " << index_name << " already exists");
             return false;
         }
+
+        // 目前只支持单列索引
         if (key_columns.size() != 1) {
             LOG_ERROR("IndexManager: Multi-column indexes not supported yet");
             return false;
         }
+
         if (table_schema == nullptr) {
             LOG_ERROR("IndexManager: Table "
                       << table_name << " does not exist or schema is null");
             return false;
         }
 
-        // 添加表存在性验证
+        // 验证表是否存在于catalog中
         if (catalog_ != nullptr) {
             TableInfo* table_info = catalog_->GetTable(table_name);
             if (table_info == nullptr) {
@@ -121,7 +162,7 @@ class IndexManagerImpl {
                           << table_name << " does not exist in catalog");
                 return false;
             }
-            // 验证schema是否匹配
+            // 确保传入的schema和catalog中的一致
             if (table_info->schema.get() != table_schema) {
                 LOG_ERROR("IndexManager: Schema mismatch for table "
                           << table_name);
@@ -129,6 +170,7 @@ class IndexManagerImpl {
             }
         }
 
+        // 验证索引列是否存在
         const std::string& column_name = key_columns[0];
         if (!table_schema->HasColumn(column_name)) {
             LOG_ERROR("IndexManager: Column "
@@ -136,6 +178,7 @@ class IndexManagerImpl {
             return false;
         }
 
+        // 获取列信息并确定索引键类型
         const Column& column = table_schema->GetColumn(column_name);
         IndexKeyType key_type = DetermineKeyType(column);
         if (key_type == IndexKeyType::INVALID) {
@@ -145,14 +188,19 @@ class IndexManagerImpl {
             return false;
         }
 
+        // 创建索引元数据
         auto metadata = std::make_unique<IndexMetadata>(
             key_type, index_name, table_name, key_columns);
 
         bool success = false;
+
+        // 根据数据类型创建对应的B+树实例
+        // 使用模板特化为不同类型创建专用的B+树
         switch (key_type) {
             case IndexKeyType::INT32: {
                 auto tree = std::make_unique<BPlusTree<int32_t, RID>>(
                     index_name, buffer_pool_manager_);
+                // 使用自定义删除器保存B+树实例
                 metadata->index_instance =
                     std::unique_ptr<void, std::function<void(void*)>>(
                         tree.release(), [](void* ptr) {
@@ -214,12 +262,13 @@ class IndexManagerImpl {
         }
 
         if (success) {
+            // 将创建的索引添加到管理器中
             indexes_[index_name] = std::move(metadata);
             LOG_INFO("IndexManager: Successfully created index "
                      << index_name << " (now have " << indexes_.size()
                      << " indexes)");
 
-            // Debug: List all current indexes
+            // Debug: 列出当前所有索引
             LOG_DEBUG("IndexManager: Current indexes after creation:");
             for (const auto& [name, meta] : indexes_) {
                 LOG_DEBUG("  - " << name << " on table " << meta->table_name);
@@ -231,7 +280,11 @@ class IndexManagerImpl {
         }
     }
 
-    // 删除索引
+    /**
+     * 删除指定的索引
+     * @param index_name 要删除的索引名称
+     * @return 成功返回true，失败返回false
+     */
     bool DropIndex(const std::string& index_name) {
         std::lock_guard<std::mutex> lock(latch_);
         LOG_DEBUG("IndexManager: Dropping index "
@@ -244,12 +297,13 @@ class IndexManagerImpl {
             return false;
         }
 
+        // 直接从map中删除，会自动调用析构函数清理B+树
         indexes_.erase(it);
         LOG_INFO("IndexManager: Successfully dropped index "
                  << index_name << " (now have " << indexes_.size()
                  << " indexes)");
 
-        // Debug: List remaining indexes
+        // Debug: 列出剩余的索引
         LOG_DEBUG("IndexManager: Remaining indexes after drop:");
         for (const auto& [name, meta] : indexes_) {
             LOG_DEBUG("  - " << name << " on table " << meta->table_name);
@@ -257,7 +311,12 @@ class IndexManagerImpl {
         return true;
     }
 
-    // 获取索引实例（类型安全）
+    /**
+     * 获取指定类型的B+树索引实例
+     * 使用模板提供类型安全的访问
+     * @param index_name 索引名称
+     * @return 对应类型的B+树指针，不存在返回nullptr
+     */
     template <typename KeyType>
     BPlusTree<KeyType, RID>* GetIndex(const std::string& index_name) {
         std::lock_guard<std::mutex> lock(latch_);
@@ -268,11 +327,16 @@ class IndexManagerImpl {
             return nullptr;
         }
 
+        // 强制类型转换到具体的B+树类型
         return static_cast<BPlusTree<KeyType, RID>*>(
             it->second->index_instance.get());
     }
 
-    // 获取索引元数据
+    /**
+     * 获取索引的元数据信息
+     * @param index_name 索引名称
+     * @return 索引元数据指针，不存在返回nullptr
+     */
     IndexMetadata* GetIndexMetadata(const std::string& index_name) {
         std::lock_guard<std::mutex> lock(latch_);
 
@@ -283,7 +347,14 @@ class IndexManagerImpl {
         return it->second.get();
     }
 
-    // 插入键值对到索引
+    /**
+     * 向索引中插入键值对
+     * 根据索引的数据类型自动选择合适的B+树进行插入
+     * @param index_name 索引名称
+     * @param key 要插入的键值
+     * @param rid 对应的记录ID
+     * @return 成功返回true，失败返回false
+     */
     bool InsertEntry(const std::string& index_name, const Value& key,
                      const RID& rid) {
         auto metadata = GetIndexMetadata(index_name);
@@ -293,6 +364,7 @@ class IndexManagerImpl {
             return false;
         }
 
+        // 根据索引类型调用对应的B+树插入方法
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
@@ -339,7 +411,12 @@ class IndexManagerImpl {
         return false;
     }
 
-    // 从索引中删除键值对
+    /**
+     * 从索引中删除指定键值
+     * @param index_name 索引名称
+     * @param key 要删除的键值
+     * @return 成功返回true，失败返回false
+     */
     bool DeleteEntry(const std::string& index_name, const Value& key) {
         auto metadata = GetIndexMetadata(index_name);
         if (!metadata) {
@@ -348,6 +425,7 @@ class IndexManagerImpl {
             return false;
         }
 
+        // 根据索引类型调用对应的B+树删除方法
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
@@ -394,7 +472,14 @@ class IndexManagerImpl {
         return false;
     }
 
-    // 在索引中查找键值
+    /**
+     * 在索引中查找指定键值对应的记录ID
+     * 这是索引最核心的功能，用于加速查询
+     * @param index_name 索引名称
+     * @param key 要查找的键值
+     * @param rid 输出参数，找到的记录ID
+     * @return 找到返回true，未找到返回false
+     */
     bool FindEntry(const std::string& index_name, const Value& key, RID* rid) {
         auto metadata = GetIndexMetadata(index_name);
         if (!metadata) {
@@ -407,6 +492,7 @@ class IndexManagerImpl {
                   << index_name << " for key type "
                   << static_cast<int>(metadata->key_type));
 
+        // 根据索引类型调用对应的B+树查找方法
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
@@ -484,7 +570,11 @@ class IndexManagerImpl {
         return false;
     }
 
-    // 获取所有索引名称
+    /**
+     * 获取所有索引的名称列表
+     * 用于管理和调试
+     * @return 索引名称的vector
+     */
     std::vector<std::string> GetAllIndexNames() const {
         std::lock_guard<std::mutex> lock(latch_);
         std::vector<std::string> names;
@@ -502,7 +592,12 @@ class IndexManagerImpl {
         return names;
     }
 
-    // 获取表的所有索引
+    /**
+     * 获取指定表的所有索引
+     * 用于表删除时的清理工作
+     * @param table_name 表名
+     * @return 该表的所有索引名称
+     */
     std::vector<std::string> GetTableIndexes(
         const std::string& table_name) const {
         std::lock_guard<std::mutex> lock(latch_);
@@ -521,13 +616,16 @@ class IndexManagerImpl {
     }
 
    private:
-    BufferPoolManager* buffer_pool_manager_;
-    Catalog* catalog_;
-    std::unordered_map<std::string, std::unique_ptr<IndexMetadata>> indexes_;
-    mutable std::mutex latch_;
+    BufferPoolManager*
+        buffer_pool_manager_;  // 缓冲池管理器，用于B+树的页面管理
+    Catalog* catalog_;         // 目录管理器，用于验证表信息
+    std::unordered_map<std::string, std::unique_ptr<IndexMetadata>>
+        indexes_;               // 索引名到元数据的映射
+    mutable std::mutex latch_;  // 保护indexes_的互斥锁，确保线程安全
 };
 
-// IndexManager 公共接口实现
+// ==================== IndexManager 公共接口实现 ====================
+
 IndexManager::IndexManager(BufferPoolManager* buffer_pool_manager,
                            Catalog* catalog)
     : impl_(std::make_unique<IndexManagerImpl>(buffer_pool_manager, catalog)) {}
@@ -575,7 +673,8 @@ BPlusTree<KeyType, RID>* IndexManager::GetIndex(const std::string& index_name) {
     return impl_->GetIndex<KeyType>(index_name);
 }
 
-// 显式实例化模板
+// ==================== 模板显式实例化 ====================
+// 为了支持不同数据类型的索引，需要显式实例化模板
 template BPlusTree<int32_t, RID>* IndexManager::GetIndex<int32_t>(
     const std::string& index_name);
 template BPlusTree<int64_t, RID>* IndexManager::GetIndex<int64_t>(

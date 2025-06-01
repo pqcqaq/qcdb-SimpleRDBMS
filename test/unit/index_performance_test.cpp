@@ -428,6 +428,12 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
            << ", 1, 1, 100.0, 'completed', '2023-01-01', 'alipay', 'Beijing', "
               "0.0);";
         ExecuteSQL(ss.str());
+
+        if (i % 10000 == 0) {
+            std::cout << "已插入: " << i << " (" << std::fixed
+                      << std::setprecision(1) << (100.0 * i / TEST_COUNT)
+                      << "%)" << std::endl;
+        }
     }
 
     // 创建索引
@@ -462,6 +468,12 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
            << ", 1, 1, 100.0, 'completed', '2023-01-01', 'alipay', 'Beijing', "
               "0.0);";
         ExecuteSQL(ss.str());
+
+        if (i % 10000 == 0) {
+            std::cout << "已插入: " << i << " (" << std::fixed
+                      << std::setprecision(1) << (100.0 * i / TEST_COUNT)
+                      << "%)" << std::endl;
+        }
     }
 
     // 创建索引
@@ -509,6 +521,12 @@ TEST_F(PerformanceTestFixture, ComprehensivePerformanceTest) {
         ss << "INSERT INTO test_orders VALUES (" << i << ", " << user_dis(rng_)
            << ", '" << statuses[status_dis(rng_)] << "');";
         ExecuteSQL(ss.str());
+
+        if (i % 1000 == 0) {
+            std::cout << "已插入: " << i << " (" << std::fixed
+                      << std::setprecision(1) << (100.0 * i / TEST_SIZE)
+                      << "%)" << std::endl;
+        }
     }
 
     // 无索引查询

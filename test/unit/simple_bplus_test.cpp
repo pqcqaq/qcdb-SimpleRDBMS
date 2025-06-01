@@ -180,7 +180,8 @@ bool VerifyDataIntegrity(
 }
 
 int main() {
-        // 清理之前的测试文件
+    setenv("SIMPLEDB_DEBUG_LEVEL", "4", 1);  // DEBUG级别
+    // 清理之前的测试文件
     std::remove("simple_test.db");
     std::remove("bplus_tree_test.log");
     // 创建日志器
@@ -210,26 +211,27 @@ int main() {
 
         logger.Info("所有组件创建成功!");
 
-                // ========== 简单插入测试 ==========
+        // ========== 简单插入测试 ==========
         logger.Info("\n--- 开始简单插入测试 ---");
-        
+
         // 尝试插入单个元素
         RID test_rid{1, 1};
         logger.Debug("尝试插入单个元素: key=999, rid={1,1}");
-        
+
         bool single_result = bplus_tree->Insert(999, test_rid);
-        logger.Info("单个插入结果: " + std::string(single_result ? "成功" : "失败"));
-        
+        logger.Info("单个插入结果: " +
+                    std::string(single_result ? "成功" : "失败"));
+
         if (!single_result) {
             logger.Error("单个插入失败，退出测试");
             return 1;
         }
-        
+
         // 验证插入的元素
         RID retrieved_rid;
         bool found = bplus_tree->GetValue(999, &retrieved_rid);
         logger.Info("查询结果: " + std::string(found ? "找到" : "未找到"));
-        
+
         if (found) {
             logger.Info("✓ 简单插入测试通过!");
         } else {
@@ -402,7 +404,8 @@ int main() {
         for (int i = 0; i < test_size; i += 2) {
             auto start = std::chrono::high_resolution_clock::now();
 
-            // logger.Debug("尝试删除键: " + std::to_string(test_data[i].first));
+            // logger.Debug("尝试删除键: " +
+            // std::to_string(test_data[i].first));
             bool success = bplus_tree->Remove(test_data[i].first);
             // logger.Debug("删除键 " + std::to_string(test_data[i].first) +
             //              " 结果: " + (success ? "成功" : "失败"));
@@ -511,72 +514,76 @@ int main() {
 
         logger.Info("========================================");
 
-         // ========== 持久化验证测试 ==========
+        // ========== 持久化验证测试 ==========
         logger.Info("\n--- 持久化验证测试 ---");
-        
+
         // 先强制刷新所有页面
         logger.Debug("强制刷新所有页面到磁盘...");
         buffer_pool_manager->FlushAllPages();
-        
+
         // 检查文件大小（应该不为0）
-        std::ifstream file_check("simple_test.db", std::ios::binary | std::ios::ate);
+        std::ifstream file_check("simple_test.db",
+                                 std::ios::binary | std::ios::ate);
         size_t file_size_before = 0;
         if (file_check.is_open()) {
             file_size_before = file_check.tellg();
             file_check.close();
-            logger.Info("刷新后文件大小: " + std::to_string(file_size_before) + " 字节");
+            logger.Info("刷新后文件大小: " + std::to_string(file_size_before) +
+                        " 字节");
         }
-        
+
         if (file_size_before == 0) {
             logger.Error("⚠️  警告: 刷新后文件大小仍为0，数据可能未正确持久化");
         } else {
             logger.Info("✓ 数据已成功写入磁盘");
         }
-        
+
         // 模拟重启：销毁当前B+树，重新创建
         logger.Info("模拟系统重启 - 销毁并重新创建B+树...");
         bplus_tree.reset();
-        
+
         // 重新创建B+树（使用相同的缓冲池管理器）
         bplus_tree = std::make_unique<BPlusTree<int32_t, RID>>(
             "test_index", buffer_pool_manager.get());
-        
+
         // 验证重启后数据是否还在
         logger.Info("验证重启后的数据完整性...");
         int found_after_restart = 0;
         int expected_after_restart = 0;
-        
+
         for (int i = 1; i < test_size; i += 2) {  // 只检查奇数键（应该存在的）
             expected_after_restart++;
             RID result;
             if (bplus_tree->GetValue(i, &result)) {
                 found_after_restart++;
-            } else {
-                logger.Error("重启后找不到键: " + std::to_string(i));
             }
         }
-        
+
         logger.Info("重启后数据验证完成:");
-        logger.Info("期望找到: " + std::to_string(expected_after_restart) + " 条记录");
-        logger.Info("实际找到: " + std::to_string(found_after_restart) + " 条记录");
-        
+        logger.Info("期望找到: " + std::to_string(expected_after_restart) +
+                    " 条记录");
+        logger.Info("实际找到: " + std::to_string(found_after_restart) +
+                    " 条记录");
+
         bool persistence_ok = (found_after_restart == expected_after_restart);
-        
+
         // 检查不应该存在的偶数键
         int unexpected_found = 0;
         for (int i = 0; i < test_size; i += 2) {  // 检查偶数键（应该已删除）
             RID result;
             if (bplus_tree->GetValue(i, &result)) {
                 unexpected_found++;
-                logger.Error("重启后发现不应存在的偶数键: " + std::to_string(i));
+                logger.Error("重启后发现不应存在的偶数键: " +
+                             std::to_string(i));
             }
         }
-        
+
         if (unexpected_found > 0) {
-            logger.Error("发现 " + std::to_string(unexpected_found) + " 个不应存在的键");
+            logger.Error("发现 " + std::to_string(unexpected_found) +
+                         " 个不应存在的键");
             persistence_ok = false;
         }
-        
+
         // ========== 最终测试总结 ==========
         logger.Info("\n========================================");
         logger.Info("              最终测试总结");
@@ -595,7 +602,8 @@ int main() {
         logger.Info("文件大小: " + std::to_string(file_size_before) + " 字节");
 
         if (insert_success == test_size && found_count == test_size &&
-            remaining_count == expected_remaining && integrity_ok && persistence_ok) {
+            remaining_count == expected_remaining && integrity_ok &&
+            persistence_ok) {
             logger.Info("🎉 所有测试均通过，包括持久化验证!");
         } else {
             logger.Warn("⚠️  部分测试未通过，请检查日志详情");
@@ -609,26 +617,31 @@ int main() {
         // 最后再次强制刷新所有页面到磁盘
         logger.Debug("最终强制刷新所有页面到磁盘...");
         buffer_pool_manager->FlushAllPages();
-        
+
         // 检查最终文件大小
-        std::ifstream final_file_check("simple_test.db", std::ios::binary | std::ios::ate);
+        std::ifstream final_file_check("simple_test.db",
+                                       std::ios::binary | std::ios::ate);
         if (final_file_check.is_open()) {
             size_t final_file_size = final_file_check.tellg();
             final_file_check.close();
-            logger.Info("最终文件大小: " + std::to_string(final_file_size) + " 字节");
-            
+            logger.Info("最终文件大小: " + std::to_string(final_file_size) +
+                        " 字节");
+
             if (final_file_size > 0) {
                 double kb_size = final_file_size / 1024.0;
                 logger.Info("最终文件大小: " + std::to_string(kb_size) + " KB");
-                
+
                 // 计算平均每条记录的开销
                 if (found_after_restart > 0) {
-                    double bytes_per_record = static_cast<double>(final_file_size) / found_after_restart;
-                    logger.Info("平均每条记录开销: " + std::to_string(bytes_per_record) + " 字节");
+                    double bytes_per_record =
+                        static_cast<double>(final_file_size) /
+                        found_after_restart;
+                    logger.Info("平均每条记录开销: " +
+                                std::to_string(bytes_per_record) + " 字节");
                 }
             }
         }
-        
+
         logger.Info("测试完成，所有操作已记录到日志文件 bplus_tree_test.log");
         logger.Info("========================================");
 

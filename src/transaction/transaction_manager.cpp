@@ -1,3 +1,12 @@
+/*
+ * 文件: transaction_manager.cpp
+ * 作者: QCQCQC
+ * 日期: 2025-6-1
+ * 描述:
+ * 事务管理模块的核心实现，提供事务的创建（Begin）、提交（Commit）和回滚（Abort）等功能。
+ *       与 LockManager 以及 LogManager 配合，支持事务的隔离控制与WAL日志记录。
+ */
+
 #include "transaction/transaction_manager.h"
 
 #include "common/debug.h"
@@ -5,12 +14,19 @@
 
 namespace SimpleRDBMS {
 
+/**
+ * 构造函数，初始化事务管理器，绑定锁管理器和日志管理器
+ */
 TransactionManager::TransactionManager(LockManager* lock_manager,
                                        LogManager* log_manager)
     : lock_manager_(lock_manager), log_manager_(log_manager) {}
 
+/**
+ * 析构函数：
+ * - 尝试终止所有仍处于活跃状态（Growing 或 Shrinking）的事务
+ * - 释放它们持有的所有锁
+ */
 TransactionManager::~TransactionManager() {
-    // 简化析构函数，减少异常可能性
     std::lock_guard<std::mutex> lock(txn_map_latch_);
     for (auto& [txn_id, txn] : txn_map_) {
         if (txn && (txn->GetState() == TransactionState::GROWING ||
@@ -20,23 +36,27 @@ TransactionManager::~TransactionManager() {
                 try {
                     lock_manager_->UnlockAll(txn.get());
                 } catch (...) {
-                    // 忽略析构函数中的异常
+                    // 析构期间不抛出异常，安全退出
                 }
             }
         }
     }
 }
 
+/**
+ * 创建一个新的事务对象，并将其加入事务映射表
+ * 同时会记录 BEGIN 日志（若启用了日志模块）
+ */
 Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
     LOG_DEBUG("TransactionManager::Begin: Starting new transaction");
 
     txn_id_t txn_id = GetNextTxnId();
     LOG_DEBUG("TransactionManager::Begin: Assigned transaction ID " << txn_id);
 
-    // Create new transaction
+    // 分配事务对象并设置隔离级别
     auto txn = std::make_unique<Transaction>(txn_id, isolation_level);
 
-    // 简化日志记录，避免可能的卡死
+    // 如果配置了日志管理器，写入 BEGIN 记录
     if (log_manager_ != nullptr) {
         try {
             LOG_DEBUG("TransactionManager::Begin: Writing begin log record");
@@ -49,11 +69,11 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
         } catch (const std::exception& e) {
             LOG_WARN("TransactionManager::Begin: Failed to write log record: "
                      << e.what());
-            // 如果日志失败，继续执行，不影响事务创建
+            // 写日志失败不影响事务创建
         }
     }
 
-    // Add to transaction map
+    // 添加事务到全局事务表中
     Transaction* txn_ptr = txn.get();
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
@@ -62,81 +82,87 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
 
     LOG_DEBUG("TransactionManager::Begin: Transaction "
               << txn_id << " created successfully");
-    LOG_DEBUG("TransactionManager::Begin: Transaction state is GROWING, ptr is "
-              << txn_ptr);
     return txn_ptr;
 }
 
+/**
+ * 提交事务：
+ * - 更改状态为 COMMITTED
+ * - 写入 COMMIT 日志记录
+ * - Flush 到磁盘
+ * - 释放所有持有的锁
+ * - 从全局事务表移除
+ */
 bool TransactionManager::Commit(Transaction* txn) {
     if (txn == nullptr) {
         return false;
     }
 
-    // Change state to committed
     txn->SetState(TransactionState::COMMITTED);
 
-    // 简化日志记录
     if (log_manager_ != nullptr) {
         try {
             CommitLogRecord log_record(txn->GetTxnId(), txn->GetPrevLSN());
             lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
             txn->SetPrevLSN(lsn);
-
-            // 简化flush，不等待
-            log_manager_->Flush(lsn);
+            log_manager_->Flush(lsn);  // 将日志刷新到磁盘
         } catch (...) {
-            // 日志失败不影响事务提交
+            // 即使日志失败，也不阻止事务提交
         }
     }
 
-    // Release all locks
     if (lock_manager_) {
-        lock_manager_->UnlockAll(txn);
+        lock_manager_->UnlockAll(txn);  // 释放该事务的所有锁
     }
 
-    // Remove from transaction map
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+
     LOG_DEBUG("TransactionManager::Commit: Transaction "
               << txn->GetTxnId() << " committed successfully");
     return true;
 }
 
+/**
+ * 回滚事务：
+ * - 更改状态为 ABORTED
+ * - 写入 ABORT 日志记录
+ * - Flush 到磁盘
+ * - 释放所有持有的锁
+ * - 从全局事务表移除
+ */
 bool TransactionManager::Abort(Transaction* txn) {
     if (txn == nullptr) {
         return false;
     }
+
     LOG_DEBUG("TransactionManager::Abort: Aborting transaction "
               << txn->GetTxnId());
-    // Change state to aborted
+
     txn->SetState(TransactionState::ABORTED);
 
-    // 简化日志记录
     if (log_manager_ != nullptr) {
         try {
             AbortLogRecord log_record(txn->GetTxnId(), txn->GetPrevLSN());
             lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
             txn->SetPrevLSN(lsn);
-
-            // 简化flush，不等待
-            log_manager_->Flush(lsn);
+            log_manager_->Flush(lsn);  // 将日志刷新到磁盘
         } catch (...) {
-            // 日志失败不影响事务abort
+            // 即使日志失败也继续回滚
         }
     }
 
-    // Release all locks
     if (lock_manager_) {
-        lock_manager_->UnlockAll(txn);
+        lock_manager_->UnlockAll(txn);  // 释放所有锁
     }
 
-    // Remove from transaction map
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+
     LOG_DEBUG("TransactionManager::Abort: Transaction "
               << txn->GetTxnId() << " aborted successfully");
     return true;

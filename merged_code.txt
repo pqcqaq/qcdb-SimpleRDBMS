@@ -1,7 +1,7 @@
 
 ========== ./src/buffer/buffer_pool_manager.cpp ==========
 namespace SimpleRDBMS {
-BufferPoolManager::BufferPoolManager(size_t pool_size, 
+BufferPoolManager::BufferPoolManager(size_t pool_size,
                                      std::unique_ptr<DiskManager> disk_manager,
                                      std::unique_ptr<Replacer> replacer)
     : pool_size_(pool_size),
@@ -44,7 +44,8 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
         Page* page = &pages_[frame_id];
         page->IncreasePinCount();
         replacer_->Pin(frame_id);
-        LOG_TRACE("Page " << page_id << " found in buffer pool at frame " << frame_id);
+        LOG_TRACE("Page " << page_id << " found in buffer pool at frame "
+                          << frame_id);
         return page;
     }
     size_t frame_id;
@@ -61,7 +62,8 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
             return nullptr;
         }
         page = &pages_[frame_id];
-        LOG_TRACE("Evicting page " << page->GetPageId() << " from frame " << frame_id);
+        LOG_TRACE("Evicting page " << page->GetPageId() << " from frame "
+                                   << frame_id);
         if (page->IsDirty() && page->GetPageId() != INVALID_PAGE_ID) {
             LOG_DEBUG("Writing dirty page " << page->GetPageId() << " to disk");
             disk_manager_->WritePage(page->GetPageId(), page->GetData());
@@ -71,8 +73,8 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
             page_table_.erase(page->GetPageId());
         }
     }
-    LOG_TRACE("Reading page " << page_id << " from disk (num_pages=" 
-              << disk_manager_->GetNumPages() << ")");
+    LOG_TRACE("Reading page " << page_id << " from disk (num_pages="
+                              << disk_manager_->GetNumPages() << ")");
     try {
         page->SetPageId(page_id);
         page->SetDirty(false);
@@ -86,12 +88,14 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
         replacer_->Pin(frame_id);
         return page;
     } catch (const StorageException& e) {
-        LOG_DEBUG("Page " << page_id << " does not exist on disk: " << e.what() 
-                  << " (num_pages=" << disk_manager_->GetNumPages() << ")");
+        LOG_DEBUG("Page " << page_id << " does not exist on disk: " << e.what()
+                          << " (num_pages=" << disk_manager_->GetNumPages()
+                          << ")");
         free_list_.push_back(frame_id);
         return nullptr;
     } catch (const std::exception& e) {
-        LOG_ERROR("Unexpected exception when reading page " << page_id << ": " << e.what()
+        LOG_ERROR("Unexpected exception when reading page "
+                  << page_id << ": " << e.what()
                   << " (num_pages=" << disk_manager_->GetNumPages() << ")");
         free_list_.push_back(frame_id);
         return nullptr;
@@ -114,14 +118,17 @@ Page* BufferPoolManager::NewPage(page_id_t* page_id) {
     } else {
         frame_id = FindVictimPage();
         if (frame_id == static_cast<size_t>(-1)) {
-            LOG_ERROR("No page can be evicted for new page, all pages are pinned");
+            LOG_ERROR(
+                "No page can be evicted for new page, all pages are pinned");
             *page_id = INVALID_PAGE_ID;
             return nullptr;
         }
         page = &pages_[frame_id];
-        LOG_TRACE("Evicting page " << page->GetPageId() << " from frame " << frame_id << " for new page");
+        LOG_TRACE("Evicting page " << page->GetPageId() << " from frame "
+                                   << frame_id << " for new page");
         if (page->IsDirty() && page->GetPageId() != INVALID_PAGE_ID) {
-            LOG_DEBUG("Writing dirty page " << page->GetPageId() << " to disk before eviction");
+            LOG_DEBUG("Writing dirty page " << page->GetPageId()
+                                            << " to disk before eviction");
             disk_manager_->WritePage(page->GetPageId(), page->GetData());
             page->SetDirty(false);
         }
@@ -141,7 +148,8 @@ Page* BufferPoolManager::NewPage(page_id_t* page_id) {
     page_table_[*page_id] = frame_id;
     page->IncreasePinCount();
     replacer_->Pin(frame_id);
-    LOG_TRACE("NewPage returning page " << *page_id << " in frame " << frame_id);
+    LOG_TRACE("NewPage returning page " << *page_id << " in frame "
+                                        << frame_id);
     return page;
 }
 bool BufferPoolManager::DeletePage(page_id_t page_id) {
@@ -155,7 +163,9 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
     size_t frame_id = it->second;
     Page* page = &pages_[frame_id];
     if (page->GetPinCount() > 0) {
-        LOG_DEBUG("Force unpinning page " << page_id << " before deletion (pin_count=" << page->GetPinCount() << ")");
+        LOG_DEBUG("Force unpinning page " << page_id
+                                          << " before deletion (pin_count="
+                                          << page->GetPinCount() << ")");
         while (page->GetPinCount() > 0) {
             page->DecreasePinCount();
         }
@@ -172,7 +182,8 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
 }
 bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     std::unique_lock<std::mutex> lock(latch_);
-    LOG_TRACE("UnpinPage called with page_id=" << page_id << ", is_dirty=" << is_dirty);
+    LOG_TRACE("UnpinPage called with page_id=" << page_id
+                                               << ", is_dirty=" << is_dirty);
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {
         LOG_DEBUG("UnpinPage: page " << page_id << " not in buffer pool");
@@ -181,8 +192,9 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     size_t frame_id = it->second;
     Page* page = &pages_[frame_id];
     if (page->GetPinCount() <= 0) {
-        LOG_DEBUG("UnpinPage: page " << page_id << " already unpinned (pin_count=" 
-                 << page->GetPinCount() << ")");
+        LOG_DEBUG("UnpinPage: page " << page_id
+                                     << " already unpinned (pin_count="
+                                     << page->GetPinCount() << ")");
         return true;
     }
     page->DecreasePinCount();
@@ -191,9 +203,11 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     }
     if (page->GetPinCount() == 0) {
         replacer_->Unpin(frame_id);
-        LOG_TRACE("UnpinPage: page " << page_id << " unpinned and added to replacer");
+        LOG_TRACE("UnpinPage: page " << page_id
+                                     << " unpinned and added to replacer");
     }
-    LOG_TRACE("UnpinPage: page " << page_id << " pin_count=" << page->GetPinCount());
+    LOG_TRACE("UnpinPage: page " << page_id
+                                 << " pin_count=" << page->GetPinCount());
     return true;
 }
 bool BufferPoolManager::FlushPage(page_id_t page_id) {
@@ -205,10 +219,13 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
         try {
             char temp_buffer[PAGE_SIZE];
             disk_manager_->ReadPage(page_id, temp_buffer);
-            LOG_DEBUG("FlushPage: page " << page_id << " exists on disk but not in buffer pool");
+            LOG_DEBUG("FlushPage: page "
+                      << page_id << " exists on disk but not in buffer pool");
             return true;
         } catch (const StorageException&) {
-            LOG_DEBUG("FlushPage: page " << page_id << " does not exist on disk or in buffer pool");
+            LOG_DEBUG("FlushPage: page "
+                      << page_id
+                      << " does not exist on disk or in buffer pool");
             return false;
         }
     }
@@ -221,7 +238,8 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
         LOG_DEBUG("Page " << page_id << " successfully written to disk");
         return true;
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to flush page " << page_id << " to disk: " << e.what());
+        LOG_ERROR("Failed to flush page " << page_id
+                                          << " to disk: " << e.what());
         return false;
     }
 }
@@ -239,13 +257,14 @@ void BufferPoolManager::FlushAllPages() {
                 page->SetDirty(false);
                 flushed_count++;
             } catch (const std::exception& e) {
-                LOG_ERROR("Failed to flush page " << page->GetPageId() << ": " << e.what());
+                LOG_ERROR("Failed to flush page " << page->GetPageId() << ": "
+                                                  << e.what());
                 error_count++;
             }
         }
     }
-    LOG_INFO("FlushAllPages completed: flushed " << flushed_count 
-             << " pages, " << error_count << " errors");
+    LOG_INFO("FlushAllPages completed: flushed " << flushed_count << " pages, "
+                                                 << error_count << " errors");
 }
 size_t BufferPoolManager::FindVictimPage() {
     size_t victim_frame_id;
@@ -262,7 +281,62 @@ void BufferPoolManager::UpdatePage(Page* page, page_id_t page_id) {
         page->DecreasePinCount();
     }
 }
+Page* BufferPoolManager::GetSpecificPage(page_id_t page_id) {
+    std::unique_lock<std::mutex> lock(latch_);
+    auto it = page_table_.find(page_id);
+    if (it != page_table_.end()) {
+        size_t frame_id = it->second;
+        Page* page = &pages_[frame_id];
+        page->IncreasePinCount();
+        replacer_->Pin(frame_id);
+        return page;
+    }
+    size_t frame_id;
+    Page* page = nullptr;
+    if (!free_list_.empty()) {
+        frame_id = free_list_.front();
+        free_list_.pop_front();
+        page = &pages_[frame_id];
+    } else {
+        frame_id = FindVictimPage();
+        if (frame_id == static_cast<size_t>(-1)) {
+            return nullptr;
+        }
+        page = &pages_[frame_id];
+        if (page->IsDirty() && page->GetPageId() != INVALID_PAGE_ID) {
+            disk_manager_->WritePage(page->GetPageId(), page->GetData());
+            page->SetDirty(false);
+        }
+        if (page->GetPageId() != INVALID_PAGE_ID) {
+            page_table_.erase(page->GetPageId());
+        }
+    }
+    try {
+        page->SetPageId(page_id);
+        page->SetDirty(false);
+        page->SetLSN(INVALID_LSN);
+        while (page->GetPinCount() > 0) {
+            page->DecreasePinCount();
+        }
+        if (page_id < disk_manager_->GetNumPages()) {
+            disk_manager_->ReadPage(page_id, page->GetData());
+        } else {
+            std::memset(page->GetData(), 0, PAGE_SIZE);
+            page->SetDirty(true);
+        }
+        page_table_[page_id] = frame_id;
+        page->IncreasePinCount();
+        replacer_->Pin(frame_id);
+        return page;
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to get specific page " << page_id << ": "
+                                                 << e.what());
+        free_list_.push_back(frame_id);
+        return nullptr;
+    }
 }
+}
+
 
 ========== ./src/buffer/lru_replacer.cpp ==========
 namespace SimpleRDBMS {
@@ -308,6 +382,7 @@ size_t LRUReplacer::Size() const {
     return lru_list_.size();
 }
 }
+
 
 ========== ./src/catalog/catalog.cpp ==========
 namespace SimpleRDBMS {
@@ -480,22 +555,22 @@ void Catalog::LoadCatalogFromDisk() {
         LOG_ERROR("LoadCatalogFromDisk: BufferPoolManager is null");
         return;
     }
-    LOG_DEBUG("LoadCatalogFromDisk: Attempting to fetch catalog page 1");
+    LOG_DEBUG("LoadCatalogFromDisk: Attempting to fetch catalog page 0");
     Page* catalog_page = nullptr;
     try {
-        catalog_page = buffer_pool_manager_->FetchPage(1);
+        catalog_page = buffer_pool_manager_->GetSpecificPage(0);
     } catch (const std::exception& e) {
-        LOG_WARN("LoadCatalogFromDisk: Exception when fetching page 1: "
-                 << e.what());
+        LOG_WARN(
+            "LoadCatalogFromDisk: Exception when getting page 0: " << e.what());
         return;
     }
     if (catalog_page == nullptr) {
         LOG_DEBUG(
-            "LoadCatalogFromDisk: Page 1 does not exist, assuming new "
+            "LoadCatalogFromDisk: Page 0 does not exist, assuming new "
             "database");
         return;
     }
-    LOG_DEBUG("LoadCatalogFromDisk: Successfully fetched catalog page 1");
+    LOG_DEBUG("LoadCatalogFromDisk: Successfully got catalog page 0");
     const char* data = catalog_page->GetData();
     size_t offset = 0;
     uint32_t magic_number;
@@ -508,7 +583,7 @@ void Catalog::LoadCatalogFromDisk() {
         LOG_WARN(
             "LoadCatalogFromDisk: Invalid magic number, not a valid catalog "
             "page");
-        buffer_pool_manager_->UnpinPage(1, false);
+        buffer_pool_manager_->UnpinPage(0, false);
         return;
     }
     LOG_DEBUG(
@@ -642,7 +717,7 @@ void Catalog::LoadCatalogFromDisk() {
     } else {
         LOG_DEBUG("LoadCatalogFromDisk: No space left to read indexes");
     }
-    buffer_pool_manager_->UnpinPage(1, false);
+    buffer_pool_manager_->UnpinPage(0, false);
     LOG_DEBUG(
         "LoadCatalogFromDisk: Catalog load completed successfully, loaded "
         << tables_.size() << " tables and " << indexes_.size() << " indexes");
@@ -661,27 +736,21 @@ void Catalog::SaveCatalogToDisk() {
     save_in_progress_.store(true);
     try {
         LOG_DEBUG("SaveCatalogToDisk: Starting catalog save");
-        Page* catalog_page = buffer_pool_manager_->FetchPage(1);
+        const page_id_t CATALOG_PAGE_ID = 0;
+        Page* catalog_page =
+            buffer_pool_manager_->GetSpecificPage(CATALOG_PAGE_ID);
         if (catalog_page == nullptr) {
-            LOG_DEBUG(
-                "SaveCatalogToDisk: Page 1 does not exist, creating new page");
-            page_id_t page_id;
-            catalog_page = buffer_pool_manager_->NewPage(&page_id);
-            if (catalog_page == nullptr) {
-                LOG_ERROR("SaveCatalogToDisk: Failed to create new page");
-                save_in_progress_.store(false);
-                return;
-            }
-            if (page_id != 1) {
-                LOG_WARN("SaveCatalogToDisk: Expected page 1 but got page "
-                         << page_id);
-            }
-            LOG_DEBUG("SaveCatalogToDisk: Created new catalog page with ID: "
-                      << page_id);
-        } else {
-            LOG_DEBUG("SaveCatalogToDisk: Found existing catalog page 1");
+            LOG_ERROR("SaveCatalogToDisk: Failed to get catalog page 0");
+            save_in_progress_.store(false);
+            return;
         }
-        catalog_page->IncreasePinCount();
+        if (catalog_page->GetPageId() != CATALOG_PAGE_ID) {
+            LOG_ERROR("SaveCatalogToDisk: Page ID mismatch, expected 0 but got "
+                      << catalog_page->GetPageId());
+            buffer_pool_manager_->UnpinPage(catalog_page->GetPageId(), false);
+            save_in_progress_.store(false);
+            return;
+        }
         char* data = catalog_page->GetData();
         std::memset(data, 0, PAGE_SIZE);
         size_t offset = 0;
@@ -788,19 +857,17 @@ void Catalog::SaveCatalogToDisk() {
         } else {
             LOG_WARN("SaveCatalogToDisk: No space left for indexes");
             uint32_t zero_count = 0;
-            std::memcpy(data + offset, &zero_count, sizeof(uint32_t));
-            offset += sizeof(uint32_t);
+            if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
+                std::memcpy(data + offset, &zero_count, sizeof(uint32_t));
+                offset += sizeof(uint32_t);
+            }
         }
         LOG_DEBUG("SaveCatalogToDisk: Final offset: " << offset << " bytes");
         catalog_page->SetDirty(true);
-        page_id_t catalog_page_id = catalog_page->GetPageId();
-        while (catalog_page->GetPinCount() > 0) {
-            buffer_pool_manager_->UnpinPage(catalog_page_id, true);
-        }
-        bool flush_success = buffer_pool_manager_->FlushPage(catalog_page_id);
+        buffer_pool_manager_->UnpinPage(CATALOG_PAGE_ID, true);
+        bool flush_success = buffer_pool_manager_->FlushPage(CATALOG_PAGE_ID);
         LOG_DEBUG("SaveCatalogToDisk: Force flush result: "
                   << (flush_success ? "success" : "failed"));
-        buffer_pool_manager_->FlushAllPages();
         LOG_DEBUG("SaveCatalogToDisk: Catalog save completed successfully");
     } catch (const std::exception& e) {
         LOG_ERROR("SaveCatalogToDisk: Exception during save: " << e.what());
@@ -901,6 +968,7 @@ std::vector<std::string> Catalog::GetAllTableNames() const {
 }
 }
 
+
 ========== ./src/catalog/schema.cpp ==========
 namespace SimpleRDBMS {
 Schema::Schema(const std::vector<Column>& columns) : columns_(columns) {
@@ -951,6 +1019,8 @@ size_t Schema::GetTupleSize() const {
                 size += column.size;
                 break;
             default:
+                LOG_WARN(
+                    "Unknown column type: " << static_cast<int>(column.type));
                 break;
         }
     }
@@ -960,6 +1030,7 @@ bool Schema::HasColumn(const std::string& name) const {
     return column_indices_.find(name) != column_indices_.end();
 }
 }
+
 
 ========== ./src/catalog/table_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -1521,6 +1592,7 @@ bool TableManager::DropTable(const std::string& table_name) {
 }
 }
 
+
 ========== ./src/execution/execution_engine.cpp ==========
 namespace SimpleRDBMS {
 ExecutionEngine::ExecutionEngine(BufferPoolManager* buffer_pool_manager,
@@ -1531,7 +1603,8 @@ ExecutionEngine::ExecutionEngine(BufferPoolManager* buffer_pool_manager,
       catalog_(catalog),
       txn_manager_(txn_manager),
       log_manager_(log_manager),
-      table_manager_(std::make_unique<TableManager>(buffer_pool_manager, catalog)) {
+      table_manager_(
+          std::make_unique<TableManager>(buffer_pool_manager, catalog)) {
     if (log_manager_ && catalog_) {
         catalog_->SetLogManager(log_manager_);
     }
@@ -1624,14 +1697,16 @@ bool ExecutionEngine::Execute(Statement* statement,
     Tuple tuple;
     RID rid;
     int tuple_count = 0;
-    const int MAX_TUPLES = 10000;
+    const int MAX_TUPLES = 1000000;
     auto start_time = std::chrono::steady_clock::now();
     const auto TIMEOUT_DURATION = std::chrono::seconds(10);
     while (tuple_count < MAX_TUPLES) {
         auto current_time = std::chrono::steady_clock::now();
         if (current_time - start_time > TIMEOUT_DURATION) {
             LOG_ERROR("ExecutionEngine::Execute: Operation timed out after "
-                      << std::chrono::duration_cast<std::chrono::seconds>(TIMEOUT_DURATION).count() 
+                      << std::chrono::duration_cast<std::chrono::seconds>(
+                             TIMEOUT_DURATION)
+                             .count()
                       << " seconds");
             return false;
         }
@@ -1639,7 +1714,9 @@ bool ExecutionEngine::Execute(Statement* statement,
         try {
             has_next = executor->Next(&tuple, &rid);
         } catch (const std::exception& e) {
-            LOG_ERROR("ExecutionEngine::Execute: Exception during tuple execution: " << e.what());
+            LOG_ERROR(
+                "ExecutionEngine::Execute: Exception during tuple execution: "
+                << e.what());
             return false;
         }
         if (!has_next) {
@@ -1700,8 +1777,8 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateUpdatePlan(
     }
     auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
     return std::make_unique<UpdatePlanNode>(
-        result_schema.release(),
-        stmt->GetTableName(), std::move(updates), std::move(where_copy));
+        std::move(result_schema), stmt->GetTableName(), std::move(updates),
+        std::move(where_copy));
 }
 std::unique_ptr<PlanNode> ExecutionEngine::CreateDeletePlan(
     DeleteStatement* stmt) {
@@ -1717,8 +1794,7 @@ std::unique_ptr<PlanNode> ExecutionEngine::CreateDeletePlan(
     auto result_schema = std::make_unique<Schema>(result_columns);
     auto where_copy = ExpressionCloner::Clone(stmt->GetWhereClause());
     return std::make_unique<DeletePlanNode>(
-        result_schema.release(),
-        stmt->GetTableName(), std::move(where_copy));
+        std::move(result_schema), stmt->GetTableName(), std::move(where_copy));
 }
 std::unique_ptr<Executor> ExecutionEngine::CreateExecutor(
     ExecutorContext* exec_ctx, std::unique_ptr<PlanNode> plan) {
@@ -1938,12 +2014,9 @@ bool ExecutionEngine::HandleShowTables(std::vector<Tuple>* result_set) {
                 values.push_back(Value(table_name));
                 values.push_back(Value(col.name));
                 values.push_back(Value(TypeIdToString(col.type)));
-                values.push_back(
-                    Value(col.nullable ? "YES" : "NO"));
-                values.push_back(Value(
-                    col.is_primary_key ? "YES" : "NO"));
-                values.push_back(
-                    Value(static_cast<int32_t>(col.size)));
+                values.push_back(Value(col.nullable ? "YES" : "NO"));
+                values.push_back(Value(col.is_primary_key ? "YES" : "NO"));
+                values.push_back(Value(static_cast<int32_t>(col.size)));
                 Tuple tuple(values, &result_schema);
                 result_set->push_back(tuple);
             }
@@ -2083,6 +2156,7 @@ std::string ExecutionEngine::GetPlanNodeTypeString(PlanNodeType type) {
 }
 }
 
+
 ========== ./src/execution/executor.cpp ==========
 namespace SimpleRDBMS {
 SeqScanExecutor::SeqScanExecutor(ExecutorContext* exec_ctx,
@@ -2106,7 +2180,8 @@ void SeqScanExecutor::Init() {
 bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
     auto* seq_scan_plan = GetSeqScanPlan();
     if (!evaluator_ && seq_scan_plan->GetPredicate()) {
-        evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+        evaluator_ =
+            std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
     }
     while (!table_iterator_.IsEnd()) {
         try {
@@ -2126,7 +2201,8 @@ bool SeqScanExecutor::Next(Tuple* tuple, RID* rid) {
                 return true;
             }
         } catch (const std::exception& e) {
-            LOG_ERROR("SeqScanExecutor::Next: Exception during scan: " << e.what());
+            LOG_ERROR(
+                "SeqScanExecutor::Next: Exception during scan: " << e.what());
             return false;
         }
     }
@@ -2141,15 +2217,20 @@ IndexScanExecutor::IndexScanExecutor(ExecutorContext* exec_ctx,
       has_found_tuple_(false) {}
 void IndexScanExecutor::Init() {
     auto* index_scan_plan = GetIndexScanPlan();
-    table_info_ = exec_ctx_->GetCatalog()->GetTable(index_scan_plan->GetTableName());
+    table_info_ =
+        exec_ctx_->GetCatalog()->GetTable(index_scan_plan->GetTableName());
     if (table_info_ == nullptr) {
-        throw ExecutionException("Table not found: " + index_scan_plan->GetTableName());
+        throw ExecutionException("Table not found: " +
+                                 index_scan_plan->GetTableName());
     }
-    index_info_ = exec_ctx_->GetCatalog()->GetIndex(index_scan_plan->GetIndexName());
+    index_info_ =
+        exec_ctx_->GetCatalog()->GetIndex(index_scan_plan->GetIndexName());
     if (index_info_ == nullptr) {
-        throw ExecutionException("Index not found: " + index_scan_plan->GetIndexName());
+        throw ExecutionException("Index not found: " +
+                                 index_scan_plan->GetIndexName());
     }
-    evaluator_ = std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
+    evaluator_ =
+        std::make_unique<ExpressionEvaluator>(table_info_->schema.get());
     has_found_tuple_ = false;
     ExtractSearchKey(index_scan_plan->GetPredicate());
 }
@@ -2161,9 +2242,11 @@ bool IndexScanExecutor::Next(Tuple* tuple, RID* rid) {
     TableManager* table_manager = exec_ctx_->GetTableManager();
     IndexManager* index_manager = table_manager->GetIndexManager();
     RID found_rid;
-    bool found = index_manager->FindEntry(index_scan_plan->GetIndexName(), search_key_, &found_rid);
+    bool found = index_manager->FindEntry(index_scan_plan->GetIndexName(),
+                                          search_key_, &found_rid);
     if (found) {
-        bool success = table_info_->table_heap->GetTuple(found_rid, tuple, exec_ctx_->GetTransaction()->GetTxnId());
+        bool success = table_info_->table_heap->GetTuple(
+            found_rid, tuple, exec_ctx_->GetTransaction()->GetTxnId());
         if (success) {
             *rid = found_rid;
             has_found_tuple_ = true;
@@ -2175,7 +2258,8 @@ bool IndexScanExecutor::Next(Tuple* tuple, RID* rid) {
 void IndexScanExecutor::ExtractSearchKey(Expression* predicate) {
     if (auto* binary_expr = dynamic_cast<BinaryOpExpression*>(predicate)) {
         if (binary_expr->GetOperator() == BinaryOpExpression::OpType::EQUALS) {
-            if (auto* const_expr = dynamic_cast<ConstantExpression*>(binary_expr->GetRight())) {
+            if (auto* const_expr = dynamic_cast<ConstantExpression*>(
+                    binary_expr->GetRight())) {
                 search_key_ = const_expr->GetValue();
             }
         }
@@ -2374,8 +2458,7 @@ void ProjectionExecutor::Init() {
     if (child_plan->GetType() == PlanNodeType::SEQUENTIAL_SCAN) {
         auto* seq_scan_plan = static_cast<const SeqScanPlanNode*>(child_plan);
         auto new_seq_scan_plan = std::make_unique<SeqScanPlanNode>(
-            seq_scan_plan->GetOutputSchema(),
-            seq_scan_plan->GetTableName(),
+            seq_scan_plan->GetOutputSchema(), seq_scan_plan->GetTableName(),
             nullptr
         );
         child_executor_ = std::make_unique<SeqScanExecutor>(
@@ -2407,6 +2490,7 @@ bool ProjectionExecutor::Next(Tuple* tuple, RID* rid) {
 }
 }
 
+
 ========== ./src/execution/expression_cloner.cpp ==========
 namespace SimpleRDBMS {
 std::unique_ptr<Expression> ExpressionCloner::Clone(const Expression* expr) {
@@ -2417,7 +2501,8 @@ std::unique_ptr<Expression> ExpressionCloner::Clone(const Expression* expr) {
         case Expression::ExprType::CONSTANT:
             return CloneConstant(static_cast<const ConstantExpression*>(expr));
         case Expression::ExprType::COLUMN_REF:
-            return CloneColumnRef(static_cast<const ColumnRefExpression*>(expr));
+            return CloneColumnRef(
+                static_cast<const ColumnRefExpression*>(expr));
         case Expression::ExprType::BINARY_OP:
             return CloneBinaryOp(static_cast<const BinaryOpExpression*>(expr));
         case Expression::ExprType::UNARY_OP:
@@ -2426,22 +2511,30 @@ std::unique_ptr<Expression> ExpressionCloner::Clone(const Expression* expr) {
             return nullptr;
     }
 }
-std::unique_ptr<Expression> ExpressionCloner::CloneConstant(const ConstantExpression* expr) {
+std::unique_ptr<Expression> ExpressionCloner::CloneConstant(
+    const ConstantExpression* expr) {
     return std::make_unique<ConstantExpression>(expr->GetValue());
 }
-std::unique_ptr<Expression> ExpressionCloner::CloneColumnRef(const ColumnRefExpression* expr) {
-    return std::make_unique<ColumnRefExpression>(expr->GetTableName(), expr->GetColumnName());
+std::unique_ptr<Expression> ExpressionCloner::CloneColumnRef(
+    const ColumnRefExpression* expr) {
+    return std::make_unique<ColumnRefExpression>(expr->GetTableName(),
+                                                 expr->GetColumnName());
 }
-std::unique_ptr<Expression> ExpressionCloner::CloneBinaryOp(const BinaryOpExpression* expr) {
+std::unique_ptr<Expression> ExpressionCloner::CloneBinaryOp(
+    const BinaryOpExpression* expr) {
     auto left = Clone(expr->GetLeft());
     auto right = Clone(expr->GetRight());
-    return std::make_unique<BinaryOpExpression>(std::move(left), expr->GetOperator(), std::move(right));
+    return std::make_unique<BinaryOpExpression>(
+        std::move(left), expr->GetOperator(), std::move(right));
 }
-std::unique_ptr<Expression> ExpressionCloner::CloneUnaryOp(const UnaryOpExpression* expr) {
+std::unique_ptr<Expression> ExpressionCloner::CloneUnaryOp(
+    const UnaryOpExpression* expr) {
     auto operand = Clone(expr->GetOperand());
-    return std::make_unique<UnaryOpExpression>(expr->GetOperator(), std::move(operand));
+    return std::make_unique<UnaryOpExpression>(expr->GetOperator(),
+                                               std::move(operand));
 }
 }
+
 
 ========== ./src/execution/expression_evaluator.cpp ==========
 namespace SimpleRDBMS {
@@ -2707,6 +2800,7 @@ bool ExpressionEvaluator::IsValueTrue(const Value& value) {
 }
 }
 
+
 ========== ./src/index/b_plus_tree.cpp ==========
 namespace SimpleRDBMS {
 template <typename KeyType, typename ValueType>
@@ -2757,7 +2851,9 @@ void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
     page_id_t header_page_id = GetHeaderPageId();
     Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
     if (header_page == nullptr) {
-        LOG_DEBUG("Header page " << header_page_id << " does not exist for index " << index_name_);
+        LOG_DEBUG("Header page " << header_page_id
+                                 << " does not exist for index "
+                                 << index_name_);
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
@@ -2771,37 +2867,44 @@ void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
     size_t offset = sizeof(uint32_t) + slot_index * slot_size;
     char* data = header_page->GetData();
     uint32_t stored_hash = *reinterpret_cast<uint32_t*>(data + offset);
-    page_id_t stored_root_page_id = *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t));
+    page_id_t stored_root_page_id =
+        *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t));
     buffer_pool_manager_->UnpinPage(header_page_id, false);
     if (stored_hash != hash) {
-        LOG_DEBUG("Hash mismatch for index " << index_name_ << ", tree is empty");
+        LOG_DEBUG("Hash mismatch for index " << index_name_
+                                             << ", tree is empty");
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
-    if (stored_root_page_id == INVALID_PAGE_ID || stored_root_page_id >= num_pages) {
-        LOG_DEBUG("Invalid stored root page ID " << stored_root_page_id << " for index " << index_name_);
+    if (stored_root_page_id == INVALID_PAGE_ID ||
+        stored_root_page_id >= num_pages) {
+        LOG_DEBUG("Invalid stored root page ID "
+                  << stored_root_page_id << " for index " << index_name_);
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
     Page* root_page = buffer_pool_manager_->FetchPage(stored_root_page_id);
     if (root_page == nullptr) {
-        LOG_WARN("Root page " << stored_root_page_id << " does not exist, resetting to INVALID");
+        LOG_WARN("Root page " << stored_root_page_id
+                              << " does not exist, resetting to INVALID");
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
     auto tree_page = reinterpret_cast<BPlusTreePage*>(root_page->GetData());
     IndexPageType page_type = tree_page->GetPageType();
-    if (page_type != IndexPageType::LEAF_PAGE && page_type != IndexPageType::INTERNAL_PAGE) {
-        LOG_ERROR("Root page " << stored_root_page_id << " has invalid page type: " 
-                  << static_cast<int>(page_type));
+    if (page_type != IndexPageType::LEAF_PAGE &&
+        page_type != IndexPageType::INTERNAL_PAGE) {
+        LOG_ERROR("Root page "
+                  << stored_root_page_id
+                  << " has invalid page type: " << static_cast<int>(page_type));
         buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
     buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
     root_page_id_ = stored_root_page_id;
-    LOG_DEBUG("Successfully loaded root page ID: " << root_page_id_ 
-              << " for index: " << index_name_);
+    LOG_DEBUG("Successfully loaded root page ID: "
+              << root_page_id_ << " for index: " << index_name_);
 }
 template <typename KeyType, typename ValueType>
 page_id_t BPlusTree<KeyType, ValueType>::GetHeaderPageId() const {
@@ -2820,20 +2923,39 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
         page_id_t header_page_id = GetHeaderPageId();
         Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
         if (header_page == nullptr) {
-            page_id_t allocated_header_page_id;
-            header_page =
-                buffer_pool_manager_->NewPage(&allocated_header_page_id);
-            if (header_page == nullptr) {
-                LOG_ERROR("Failed to create header page");
+            page_id_t new_page_id;
+            Page* root_page = buffer_pool_manager_->NewPage(&new_page_id);
+            if (root_page == nullptr) {
+                LOG_ERROR("Failed to create root page");
                 return false;
             }
-            LOG_DEBUG(
-                "Created header page with ID: " << allocated_header_page_id);
-            std::memset(header_page->GetData(), 0, PAGE_SIZE);
-            *reinterpret_cast<page_id_t*>(header_page->GetData()) =
-                INVALID_PAGE_ID;
-            header_page->SetDirty(true);
-            buffer_pool_manager_->UnpinPage(allocated_header_page_id, true);
+            LOG_DEBUG("Allocated root page with ID: " << new_page_id);
+            auto root =
+                reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
+                    root_page->GetData());
+            LOG_DEBUG("Initializing root page...");
+            root->Init(new_page_id);
+            if (root->GetPageId() != new_page_id) {
+                LOG_WARN("Root page ID not set correctly, fixing...");
+                root->SetPageId(new_page_id);
+            }
+            LOG_DEBUG("Inserting key " << key << " into root page...");
+            if (!root->Insert(key, value)) {
+                LOG_ERROR("Failed to insert into empty root");
+                buffer_pool_manager_->UnpinPage(new_page_id, false);
+                buffer_pool_manager_->DeletePage(new_page_id);
+                return false;
+            }
+            root_page_id_ = new_page_id;
+            LOG_DEBUG("Setting root_page_id_ to: " << root_page_id_);
+            UpdateRootPageId(root_page_id_);
+            root_page->SetDirty(true);
+            LOG_DEBUG("Unpinning root page...");
+            buffer_pool_manager_->UnpinPage(new_page_id, true);
+            buffer_pool_manager_->FlushPage(new_page_id);
+            LOG_DEBUG("Created root page and inserted key: "
+                      << key << ", root_page_id: " << root_page_id_);
+            return true;
         } else {
             buffer_pool_manager_->UnpinPage(header_page_id, false);
         }
@@ -3256,8 +3378,7 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
                     }
                     new_parent_page->SetDirty(true);
                     buffer_pool_manager_->UnpinPage(new_parent_page_id, true);
-                    buffer_pool_manager_->FlushPage(
-                        new_parent_page_id);
+                    buffer_pool_manager_->FlushPage(new_parent_page_id);
                 }
             }
         } catch (const std::exception& e) {
@@ -3440,17 +3561,22 @@ void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node,
 }
 template <typename KeyType, typename ValueType>
 void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
-    LOG_DEBUG("UpdateRootPageId called with root_page_id: " << root_page_id 
-              << " for index: " << index_name_);
+    LOG_DEBUG("UpdateRootPageId called with root_page_id: "
+              << root_page_id << " for index: " << index_name_);
     page_id_t header_page_id = GetHeaderPageId();
     Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
     if (header_page == nullptr) {
-        LOG_DEBUG("Header page " << header_page_id << " does not exist, creating it...");
+        LOG_DEBUG("Header page " << header_page_id
+                                 << " does not exist, creating it...");
         page_id_t allocated_page_id;
         header_page = buffer_pool_manager_->NewPage(&allocated_page_id);
         if (header_page == nullptr) {
             LOG_ERROR("Failed to create header page");
             return;
+        }
+        if (allocated_page_id != header_page_id) {
+            LOG_WARN("UpdateRootPageId: Expected header page "
+                     << header_page_id << " but got " << allocated_page_id);
         }
         LOG_DEBUG("Created header page with ID: " << allocated_page_id);
         std::memset(header_page->GetData(), 0, PAGE_SIZE);
@@ -3460,17 +3586,20 @@ void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
         hash = hash * 31 + static_cast<uint32_t>(c);
     }
     size_t slot_size = sizeof(page_id_t) + sizeof(uint32_t);
-    size_t max_slots = (PAGE_SIZE - sizeof(uint32_t)) / slot_size;
+    size_t max_slots =
+        (PAGE_SIZE - sizeof(uint32_t)) / slot_size;
     size_t slot_index = hash % max_slots;
     size_t offset = sizeof(uint32_t) + slot_index * slot_size;
     char* data = header_page->GetData();
     *reinterpret_cast<uint32_t*>(data + offset) = hash;
-    *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t)) = root_page_id;
+    *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t)) =
+        root_page_id;
     header_page->SetDirty(true);
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
     buffer_pool_manager_->FlushPage(header_page->GetPageId());
-    LOG_DEBUG("Updated header page with root page ID: " << root_page_id
-              << " for index: " << index_name_ << " at slot " << slot_index);
+    LOG_DEBUG("Updated header page with root page ID: "
+              << root_page_id << " for index: " << index_name_ << " at slot "
+              << slot_index);
 }
 template <typename KeyType, typename ValueType>
 BPlusTree<KeyType, ValueType>::Iterator::Iterator(BPlusTree* tree,
@@ -3548,10 +3677,12 @@ template class BPlusTree<double, RID>;
 template class BPlusTree<std::string, RID>;
 }
 
+
 ========== ./src/index/b_plus_tree_page.cpp ==========
 namespace SimpleRDBMS {
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::Init(page_id_t page_id, page_id_t parent_id) {
+void BPlusTreeLeafPage<KeyType, ValueType>::Init(page_id_t page_id,
+                                                 page_id_t parent_id) {
     SetPageType(IndexPageType::LEAF_PAGE);
     SetPageId(page_id);
     SetParentPageId(parent_id);
@@ -3563,18 +3694,19 @@ void BPlusTreeLeafPage<KeyType, ValueType>::Init(page_id_t page_id, page_id_t pa
     SetMaxSize(std::max(16, theoretical_max - 1));
     next_page_id_ = INVALID_PAGE_ID;
 }
-void BPlusTreePage::SetSize(int size) { 
+void BPlusTreePage::SetSize(int size) {
     if (size < 0) {
-        LOG_ERROR("BPlusTreePage::SetSize: Attempting to set negative size " << size);
+        LOG_ERROR("BPlusTreePage::SetSize: Attempting to set negative size "
+                  << size);
         size_ = 0;
     } else {
-        size_ = size; 
+        size_ = size;
     }
 }
-void BPlusTreePage::IncreaseSize(int amount) { 
+void BPlusTreePage::IncreaseSize(int amount) {
     int new_size = size_ + amount;
     if (new_size < 0) {
-        LOG_ERROR("BPlusTreePage::IncreaseSize: Size would become negative: " 
+        LOG_ERROR("BPlusTreePage::IncreaseSize: Size would become negative: "
                   << size_ << " + " << amount << " = " << new_size);
         size_ = 0;
     } else {
@@ -3596,11 +3728,13 @@ ValueType BPlusTreeLeafPage<KeyType, ValueType>::ValueAt(int index) const {
         throw std::out_of_range("Index out of range");
     }
     char* data_ptr = const_cast<char*>(data_);
-    size_t offset = index * (sizeof(KeyType) + sizeof(ValueType)) + sizeof(KeyType);
+    size_t offset =
+        index * (sizeof(KeyType) + sizeof(ValueType)) + sizeof(KeyType);
     return *reinterpret_cast<ValueType*>(data_ptr + offset);
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::SetKeyAt(int index, const KeyType& key) {
+void BPlusTreeLeafPage<KeyType, ValueType>::SetKeyAt(int index,
+                                                     const KeyType& key) {
     if (index < 0 || index >= GetMaxSize()) {
         throw std::out_of_range("Index out of range");
     }
@@ -3608,11 +3742,13 @@ void BPlusTreeLeafPage<KeyType, ValueType>::SetKeyAt(int index, const KeyType& k
     *reinterpret_cast<KeyType*>(data_ + offset) = key;
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::SetValueAt(int index, const ValueType& value) {
+void BPlusTreeLeafPage<KeyType, ValueType>::SetValueAt(int index,
+                                                       const ValueType& value) {
     if (index < 0 || index >= GetMaxSize()) {
         throw std::out_of_range("Index out of range");
     }
-    size_t offset = index * (sizeof(KeyType) + sizeof(ValueType)) + sizeof(KeyType);
+    size_t offset =
+        index * (sizeof(KeyType) + sizeof(ValueType)) + sizeof(KeyType);
     *reinterpret_cast<ValueType*>(data_ + offset) = value;
 }
 template <typename KeyType, typename ValueType>
@@ -3639,17 +3775,19 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
         LOG_WARN("BPlusTreeInternalPage::KeyIndex: Invalid size " << size);
         return 0;
     }
-    const int MAX_REASONABLE_SIZE = (PAGE_SIZE - sizeof(BPlusTreePage)) / (sizeof(KeyType) + sizeof(page_id_t));
+    const int MAX_REASONABLE_SIZE = (PAGE_SIZE - sizeof(BPlusTreePage)) /
+                                    (sizeof(KeyType) + sizeof(page_id_t));
     if (size > MAX_REASONABLE_SIZE) {
-        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Size " << size 
-                  << " exceeds reasonable limit " << MAX_REASONABLE_SIZE);
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Size "
+                  << size << " exceeds reasonable limit "
+                  << MAX_REASONABLE_SIZE);
         return 0;
     }
     try {
         for (int i = 1; i <= size; i++) {
             if (i > GetMaxSize()) {
-                LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Index " << i 
-                          << " exceeds max size " << GetMaxSize());
+                LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Index "
+                          << i << " exceeds max size " << GetMaxSize());
                 return 0;
             }
             if (key < KeyAt(i)) {
@@ -3657,14 +3795,15 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
             }
         }
     } catch (const std::exception& e) {
-        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at size " << size 
-                  << ": " << e.what());
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at size "
+                  << size << ": " << e.what());
         return 0;
     }
     return size;
 }
 template <typename KeyType, typename ValueType>
-bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key, const ValueType& value) {
+bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key,
+                                                   const ValueType& value) {
     if (GetSize() >= GetMaxSize()) {
         return false;
     }
@@ -3677,8 +3816,7 @@ bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key, const Val
     int move_count = GetSize() - insert_index;
     if (move_count > 0) {
         std::memmove(data_ + (insert_index + 1) * pair_size,
-                     data_ + insert_index * pair_size,
-                     move_count * pair_size);
+                     data_ + insert_index * pair_size, move_count * pair_size);
     }
     SetKeyAt(insert_index, key);
     SetValueAt(insert_index, value);
@@ -3688,7 +3826,8 @@ bool BPlusTreeLeafPage<KeyType, ValueType>::Insert(const KeyType& key, const Val
 template <typename KeyType, typename ValueType>
 bool BPlusTreeLeafPage<KeyType, ValueType>::Delete(const KeyType& key) {
     if (GetSize() <= 0) {
-        LOG_WARN("BPlusTreeLeafPage::Delete: Attempting to delete from empty page");
+        LOG_WARN(
+            "BPlusTreeLeafPage::Delete: Attempting to delete from empty page");
         return false;
     }
     int delete_index = KeyIndex(key);
@@ -3705,12 +3844,14 @@ bool BPlusTreeLeafPage<KeyType, ValueType>::Delete(const KeyType& key) {
     if (GetSize() > 0) {
         IncreaseSize(-1);
     } else {
-        LOG_WARN("BPlusTreeLeafPage::Delete: Page size already 0, cannot decrease");
+        LOG_WARN(
+            "BPlusTreeLeafPage::Delete: Page size already 0, cannot decrease");
     }
     return true;
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::MoveHalfTo(BPlusTreeLeafPage* recipient) {
+void BPlusTreeLeafPage<KeyType, ValueType>::MoveHalfTo(
+    BPlusTreeLeafPage* recipient) {
     int total_size = GetSize();
     int split_point = (total_size + 1) / 2;
     int move_size = total_size - split_point;
@@ -3725,21 +3866,25 @@ void BPlusTreeLeafPage<KeyType, ValueType>::MoveHalfTo(BPlusTreeLeafPage* recipi
     std::memset(data_ + split_point * pair_size, 0, move_bytes);
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::MoveAllTo(BPlusTreeLeafPage* recipient) {
+void BPlusTreeLeafPage<KeyType, ValueType>::MoveAllTo(
+    BPlusTreeLeafPage* recipient) {
     size_t pair_size = sizeof(KeyType) + sizeof(ValueType);
     size_t move_bytes = GetSize() * pair_size;
-    std::memcpy(recipient->data_ + recipient->GetSize() * pair_size, data_, move_bytes);
+    std::memcpy(recipient->data_ + recipient->GetSize() * pair_size, data_,
+                move_bytes);
     recipient->IncreaseSize(GetSize());
     SetSize(0);
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::MoveFirstToEndOf(BPlusTreeLeafPage* recipient) {
+void BPlusTreeLeafPage<KeyType, ValueType>::MoveFirstToEndOf(
+    BPlusTreeLeafPage* recipient) {
     if (GetSize() == 0) return;
     recipient->Insert(KeyAt(0), ValueAt(0));
     Delete(KeyAt(0));
 }
 template <typename KeyType, typename ValueType>
-void BPlusTreeLeafPage<KeyType, ValueType>::MoveLastToFrontOf(BPlusTreeLeafPage* recipient) {
+void BPlusTreeLeafPage<KeyType, ValueType>::MoveLastToFrontOf(
+    BPlusTreeLeafPage* recipient) {
     if (GetSize() == 0) {
         LOG_WARN("BPlusTreeLeafPage::MoveLastToFrontOf: Source page is empty");
         return;
@@ -3749,14 +3894,15 @@ void BPlusTreeLeafPage<KeyType, ValueType>::MoveLastToFrontOf(BPlusTreeLeafPage*
     ValueType value = ValueAt(last_index);
     IncreaseSize(-1);
     size_t pair_size = sizeof(KeyType) + sizeof(ValueType);
-    std::memmove(recipient->data_ + pair_size, recipient->data_, 
+    std::memmove(recipient->data_ + pair_size, recipient->data_,
                  recipient->GetSize() * pair_size);
     recipient->SetKeyAt(0, key);
     recipient->SetValueAt(0, value);
     recipient->IncreaseSize(1);
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::Init(page_id_t page_id, page_id_t parent_id) {
+void BPlusTreeInternalPage<KeyType>::Init(page_id_t page_id,
+                                          page_id_t parent_id) {
     SetPageType(IndexPageType::INTERNAL_PAGE);
     SetPageId(page_id);
     SetParentPageId(parent_id);
@@ -3764,7 +3910,8 @@ void BPlusTreeInternalPage<KeyType>::Init(page_id_t page_id, page_id_t parent_id
     size_t header_size = sizeof(BPlusTreePage);
     size_t available_space = PAGE_SIZE - header_size;
     size_t entry_size = sizeof(KeyType) + sizeof(page_id_t);
-    int theoretical_max = static_cast<int>((available_space - sizeof(page_id_t)) / entry_size);
+    int theoretical_max =
+        static_cast<int>((available_space - sizeof(page_id_t)) / entry_size);
     SetMaxSize(std::max(16, theoretical_max - 1));
 }
 template <typename KeyType>
@@ -3772,7 +3919,8 @@ KeyType BPlusTreeInternalPage<KeyType>::KeyAt(int index) const {
     if (index <= 0 || index > GetSize()) {
         throw std::out_of_range("Key index out of range");
     }
-    size_t offset = sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t));
+    size_t offset =
+        sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t));
     return *reinterpret_cast<const KeyType*>(data_ + offset);
 }
 template <typename KeyType>
@@ -3780,7 +3928,8 @@ void BPlusTreeInternalPage<KeyType>::SetKeyAt(int index, const KeyType& key) {
     if (index <= 0 || index > GetMaxSize()) {
         throw std::out_of_range("Key index out of range");
     }
-    size_t offset = sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t));
+    size_t offset =
+        sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t));
     *reinterpret_cast<KeyType*>(data_ + offset) = key;
 }
 template <typename KeyType>
@@ -3792,7 +3941,9 @@ page_id_t BPlusTreeInternalPage<KeyType>::ValueAt(int index) const {
     if (index == 0) {
         offset = 0;
     } else {
-        offset = sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t)) + sizeof(KeyType);
+        offset = sizeof(page_id_t) +
+                 (index - 1) * (sizeof(KeyType) + sizeof(page_id_t)) +
+                 sizeof(KeyType);
     }
     return *reinterpret_cast<const page_id_t*>(data_ + offset);
 }
@@ -3805,7 +3956,9 @@ void BPlusTreeInternalPage<KeyType>::SetValueAt(int index, page_id_t value) {
     if (index == 0) {
         offset = 0;
     } else {
-        offset = sizeof(page_id_t) + (index - 1) * (sizeof(KeyType) + sizeof(page_id_t)) + sizeof(KeyType);
+        offset = sizeof(page_id_t) +
+                 (index - 1) * (sizeof(KeyType) + sizeof(page_id_t)) +
+                 sizeof(KeyType);
     }
     *reinterpret_cast<page_id_t*>(data_ + offset) = value;
 }
@@ -3819,7 +3972,9 @@ int BPlusTreeInternalPage<KeyType>::ValueIndex(page_id_t value) const {
     return -1;
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::InsertNodeAfter(page_id_t old_value, const KeyType& new_key, page_id_t new_value) {
+void BPlusTreeInternalPage<KeyType>::InsertNodeAfter(page_id_t old_value,
+                                                     const KeyType& new_key,
+                                                     page_id_t new_value) {
     if (GetSize() >= GetMaxSize()) {
         throw std::runtime_error("Cannot insert into full internal page");
     }
@@ -3867,7 +4022,8 @@ void BPlusTreeInternalPage<KeyType>::Remove(int index) {
     IncreaseSize(-1);
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::MoveHalfTo(BPlusTreeInternalPage* recipient, BufferPoolManager* buffer_pool_manager) {
+void BPlusTreeInternalPage<KeyType>::MoveHalfTo(
+    BPlusTreeInternalPage* recipient, BufferPoolManager* buffer_pool_manager) {
     int total_size = GetSize();
     int split_point = (total_size + 1) / 2;
     recipient->SetValueAt(0, ValueAt(split_point));
@@ -3883,7 +4039,8 @@ void BPlusTreeInternalPage<KeyType>::MoveHalfTo(BPlusTreeInternalPage* recipient
         if (child_page_id != INVALID_PAGE_ID) {
             Page* child_page = buffer_pool_manager->FetchPage(child_page_id);
             if (child_page) {
-                auto* child_tree_page = reinterpret_cast<BPlusTreePage*>(child_page->GetData());
+                auto* child_tree_page =
+                    reinterpret_cast<BPlusTreePage*>(child_page->GetData());
                 child_tree_page->SetParentPageId(recipient->GetPageId());
                 buffer_pool_manager->UnpinPage(child_page_id, true);
             }
@@ -3892,7 +4049,9 @@ void BPlusTreeInternalPage<KeyType>::MoveHalfTo(BPlusTreeInternalPage* recipient
     SetSize(split_point - 1);
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::MoveAllTo(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager) {
+void BPlusTreeInternalPage<KeyType>::MoveAllTo(
+    BPlusTreeInternalPage* recipient, const KeyType& middle_key,
+    BufferPoolManager* buffer_pool_manager) {
     int recipient_size = recipient->GetSize();
     recipient->SetKeyAt(recipient_size + 1, middle_key);
     recipient->SetValueAt(recipient_size + 1, ValueAt(0));
@@ -3907,7 +4066,8 @@ void BPlusTreeInternalPage<KeyType>::MoveAllTo(BPlusTreeInternalPage* recipient,
         if (child_page_id != INVALID_PAGE_ID) {
             Page* child_page = buffer_pool_manager->FetchPage(child_page_id);
             if (child_page) {
-                auto* child_tree_page = reinterpret_cast<BPlusTreePage*>(child_page->GetData());
+                auto* child_tree_page =
+                    reinterpret_cast<BPlusTreePage*>(child_page->GetData());
                 child_tree_page->SetParentPageId(recipient->GetPageId());
                 buffer_pool_manager->UnpinPage(child_page_id, true);
             }
@@ -3917,7 +4077,9 @@ void BPlusTreeInternalPage<KeyType>::MoveAllTo(BPlusTreeInternalPage* recipient,
     SetSize(0);
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::MoveFirstToEndOf(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager) {
+void BPlusTreeInternalPage<KeyType>::MoveFirstToEndOf(
+    BPlusTreeInternalPage* recipient, const KeyType& middle_key,
+    BufferPoolManager* buffer_pool_manager) {
     page_id_t first_child = ValueAt(0);
     int recipient_size = recipient->GetSize();
     if (recipient_size + 1 <= recipient->GetMaxSize()) {
@@ -3928,7 +4090,8 @@ void BPlusTreeInternalPage<KeyType>::MoveFirstToEndOf(BPlusTreeInternalPage* rec
     if (first_child != INVALID_PAGE_ID) {
         Page* child_page = buffer_pool_manager->FetchPage(first_child);
         if (child_page) {
-            auto* child_tree_page = reinterpret_cast<BPlusTreePage*>(child_page->GetData());
+            auto* child_tree_page =
+                reinterpret_cast<BPlusTreePage*>(child_page->GetData());
             child_tree_page->SetParentPageId(recipient->GetPageId());
             buffer_pool_manager->UnpinPage(first_child, true);
         }
@@ -3936,7 +4099,9 @@ void BPlusTreeInternalPage<KeyType>::MoveFirstToEndOf(BPlusTreeInternalPage* rec
     Remove(0);
 }
 template <typename KeyType>
-void BPlusTreeInternalPage<KeyType>::MoveLastToFrontOf(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager) {
+void BPlusTreeInternalPage<KeyType>::MoveLastToFrontOf(
+    BPlusTreeInternalPage* recipient, const KeyType& middle_key,
+    BufferPoolManager* buffer_pool_manager) {
     int last_index = GetSize();
     page_id_t last_child = ValueAt(last_index);
     for (int i = recipient->GetSize(); i >= 0; i--) {
@@ -3955,7 +4120,8 @@ void BPlusTreeInternalPage<KeyType>::MoveLastToFrontOf(BPlusTreeInternalPage* re
     if (last_child != INVALID_PAGE_ID) {
         Page* child_page = buffer_pool_manager->FetchPage(last_child);
         if (child_page) {
-            auto* child_tree_page = reinterpret_cast<BPlusTreePage*>(child_page->GetData());
+            auto* child_tree_page =
+                reinterpret_cast<BPlusTreePage*>(child_page->GetData());
             child_tree_page->SetParentPageId(recipient->GetPageId());
             buffer_pool_manager->UnpinPage(last_child, true);
         }
@@ -3974,15 +4140,24 @@ template class BPlusTreeInternalPage<double>;
 template class BPlusTreeInternalPage<std::string>;
 }
 
+
 ========== ./src/index/index_manager.cpp ==========
 namespace SimpleRDBMS {
-enum class IndexKeyType { INVALID = 0, INT32, INT64, FLOAT, DOUBLE, STRING };
+enum class IndexKeyType {
+    INVALID = 0,
+    INT32,
+    INT64,
+    FLOAT,
+    DOUBLE,
+    STRING
+};
 struct IndexMetadata {
     IndexKeyType key_type;
     std::string index_name;
     std::string table_name;
     std::vector<std::string> key_columns;
-    std::unique_ptr<void, std::function<void(void*)>> index_instance;
+    std::unique_ptr<void, std::function<void(void*)>>
+        index_instance;
     IndexMetadata(IndexKeyType type, const std::string& idx_name,
                   const std::string& tbl_name,
                   const std::vector<std::string>& columns)
@@ -4423,9 +4598,11 @@ class IndexManagerImpl {
         return table_indexes;
     }
    private:
-    BufferPoolManager* buffer_pool_manager_;
+    BufferPoolManager*
+        buffer_pool_manager_;
     Catalog* catalog_;
-    std::unordered_map<std::string, std::unique_ptr<IndexMetadata>> indexes_;
+    std::unordered_map<std::string, std::unique_ptr<IndexMetadata>>
+        indexes_;
     mutable std::mutex latch_;
 };
 IndexManager::IndexManager(BufferPoolManager* buffer_pool_manager,
@@ -4476,6 +4653,7 @@ template BPlusTree<double, RID>* IndexManager::GetIndex<double>(
 template BPlusTree<std::string, RID>* IndexManager::GetIndex<std::string>(
     const std::string& index_name);
 }
+
 
 ========== ./src/main.cpp ==========
 using namespace SimpleRDBMS;
@@ -4585,21 +4763,6 @@ class SimpleRDBMSServer {
                 std::cout << "Transaction rolled back." << std::endl;
                 return;
             }
-            std::vector<Tuple> before_result;
-            if (stmt_type == Statement::StmtType::UPDATE) {
-                auto* update_stmt =
-                    static_cast<UpdateStatement*>(statement.get());
-                ShowUpdateBefore(update_stmt->GetTableName(),
-                                 update_stmt->GetWhereClause(), before_result);
-            }
-            std::vector<Tuple> delete_candidates;
-            if (stmt_type == Statement::StmtType::DELETE) {
-                auto* delete_stmt =
-                    static_cast<DeleteStatement*>(statement.get());
-                ShowDeleteCandidates(delete_stmt->GetTableName(),
-                                     delete_stmt->GetWhereClause(),
-                                     delete_candidates);
-            }
             auto* txn = transaction_manager_->Begin();
             std::vector<Tuple> result_set;
             bool success =
@@ -4618,11 +4781,11 @@ class SimpleRDBMSServer {
                         break;
                     case Statement::StmtType::UPDATE:
                         DisplayUpdateResults(
-                            result_set, before_result,
+                            result_set,
                             static_cast<UpdateStatement*>(statement.get()));
                         break;
                     case Statement::StmtType::DELETE:
-                        DisplayDeleteResults(result_set, delete_candidates);
+                        DisplayDeleteResults(result_set);
                         break;
                     case Statement::StmtType::SHOW_TABLES:
                         DisplayShowTablesResults(result_set);
@@ -4803,99 +4966,21 @@ class SimpleRDBMSServer {
     void DisplayInsertResults(const std::vector<Tuple>& result_set) {
         std::cout << "Insert operation completed." << std::endl;
     }
-    void ShowUpdateBefore(const std::string& table_name,
-                          Expression* where_clause,
-                          std::vector<Tuple>& before_result) {
-        try {
-            std::string select_sql = "SELECT * FROM " + table_name;
-            if (where_clause) {
-                select_sql += " WHERE 1=1";
-            }
-            select_sql += ";";
-            auto* txn = transaction_manager_->Begin();
-            Parser parser(select_sql);
-            auto statement = parser.Parse();
-            bool success = execution_engine_->Execute(statement.get(),
-                                                      &before_result, txn);
-            transaction_manager_->Commit(txn);
-            if (!success) {
-                before_result.clear();
-            }
-        } catch (const std::exception& e) {
-            before_result.clear();
-        }
-    }
     void DisplayUpdateResults(const std::vector<Tuple>& result_set,
-                              const std::vector<Tuple>& before_result,
                               UpdateStatement* update_stmt) {
         if (!result_set.empty()) {
             Value affected_rows = result_set[0].GetValue(0);
             int32_t count = std::get<int32_t>(affected_rows);
             std::cout << count << " row(s) updated." << std::endl;
-            if (!before_result.empty() && count > 0) {
-                std::cout << "\nBefore update:" << std::endl;
-                DisplayTableData(before_result, update_stmt->GetTableName());
-                std::vector<Tuple> after_result;
-                try {
-                    std::string select_sql =
-                        "SELECT * FROM " + update_stmt->GetTableName() + ";";
-                    auto* txn = transaction_manager_->Begin();
-                    Parser parser(select_sql);
-                    auto statement = parser.Parse();
-                    bool success = execution_engine_->Execute(
-                        statement.get(), &after_result, txn);
-                    transaction_manager_->Commit(txn);
-                    if (success && !after_result.empty()) {
-                        std::cout << "\nAfter update:" << std::endl;
-                        DisplayTableData(after_result,
-                                         update_stmt->GetTableName());
-                    }
-                } catch (const std::exception& e) {
-                    std::cout << "Failed to retrieve updated data: " << e.what()
-                              << std::endl;
-                }
-            }
         } else {
             std::cout << "0 row(s) updated." << std::endl;
         }
     }
-    void ShowDeleteCandidates(const std::string& table_name,
-                              Expression* where_clause,
-                              std::vector<Tuple>& delete_candidates) {
-        try {
-            std::string select_sql = "SELECT * FROM " + table_name;
-            if (where_clause) {
-                select_sql += " WHERE 1=1";
-            }
-            select_sql += ";";
-            auto* txn = transaction_manager_->Begin();
-            Parser parser(select_sql);
-            auto statement = parser.Parse();
-            bool success = execution_engine_->Execute(statement.get(),
-                                                      &delete_candidates, txn);
-            transaction_manager_->Commit(txn);
-            if (!success) {
-                delete_candidates.clear();
-            }
-        } catch (const std::exception& e) {
-            delete_candidates.clear();
-        }
-    }
-    void DisplayDeleteResults(const std::vector<Tuple>& result_set,
-                              const std::vector<Tuple>& delete_candidates) {
+    void DisplayDeleteResults(const std::vector<Tuple>& result_set) {
         if (!result_set.empty()) {
             Value affected_rows = result_set[0].GetValue(0);
             int32_t count = std::get<int32_t>(affected_rows);
             std::cout << count << " row(s) deleted." << std::endl;
-            if (!delete_candidates.empty() && count > 0) {
-                std::cout << "\nDeleted records:" << std::endl;
-                size_t show_count = std::min(static_cast<size_t>(count),
-                                             delete_candidates.size());
-                std::vector<Tuple> deleted_records(
-                    delete_candidates.begin(),
-                    delete_candidates.begin() + show_count);
-                DisplayTableDataSimple(deleted_records);
-            }
         } else {
             std::cout << "0 row(s) deleted." << std::endl;
         }
@@ -5006,8 +5091,6 @@ class SimpleRDBMSServer {
     }
     void Shutdown() {
         recovery_manager_->Checkpoint();
-        buffer_pool_manager_->FlushAllPages();
-        log_manager_->Flush();
     }
     std::unique_ptr<DiskManager> disk_manager_;
     std::unique_ptr<DiskManager> log_disk_manager_;
@@ -5026,6 +5109,9 @@ int main(int argc, char* argv[]) {
     if (argc > 1) {
         db_file = argv[1];
     }
+    if (argc > 2) {
+        setenv("SIMPLEDB_DEBUG_LEVEL", argv[2], 1);
+    }
     try {
         SimpleRDBMSServer server(db_file);
         server.Run();
@@ -5035,6 +5121,7 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
+
 
 ========== ./src/parser/parser.cpp ==========
 namespace SimpleRDBMS {
@@ -5748,7 +5835,8 @@ std::unique_ptr<Statement> Parser::ParseDropIndexStatement() {
         }
         std::string table_name = current_token_.value;
         Advance();
-        LOG_DEBUG("ParseDropIndexStatement: Parsed table name " << table_name << " but ignoring it");
+        LOG_DEBUG("ParseDropIndexStatement: Parsed table name "
+                  << table_name << " but ignoring it");
     }
     return std::make_unique<DropIndexStatement>(index_name);
 }
@@ -5810,8 +5898,10 @@ void RollbackStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void ExplainStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 }
 
+
 ========== ./src/record/table_heap.cpp ==========
 namespace SimpleRDBMS {
+static const uint32_t TABLE_PAGE_MAGIC = 0xDEADBEEF;
 struct Slot {
     uint16_t offset;
     uint16_t size;
@@ -5828,28 +5918,76 @@ void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     header->lsn = INVALID_LSN;
     header->num_tuples = 0;
     header->free_space_offset = PAGE_SIZE;
-    LOG_DEBUG("TablePage::Init: initialized page " << page_id
-              << " with free_space_offset=" << header->free_space_offset);
+    LOG_DEBUG("TablePage::Init: initialized page "
+              << page_id
+              << " with free_space_offset=" << header->free_space_offset
+              << " next_page_id=" << header->next_page_id
+              << " num_tuples=" << header->num_tuples);
 }
-static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, char* page_data) {
-    const size_t header_size = sizeof(TablePage::TablePageHeader);
-    const size_t slot_size = sizeof(Slot);
-    LOG_DEBUG("ValidateAndRepairSlotDirectory: num_tuples=" << header->num_tuples 
-              << ", free_space_offset=" << header->free_space_offset);
-    if (header->num_tuples < 0) {
-        LOG_ERROR("ValidateAndRepairSlotDirectory: negative num_tuples " << header->num_tuples);
+static bool ValidateAndFixTablePageHeader(TablePage::TablePageHeader* header,
+                                          page_id_t expected_page_id) {
+    bool need_fix = false;
+    if (header->next_page_id == static_cast<page_id_t>(0x12345678)) {
+        LOG_ERROR(
+            "ValidateAndFixTablePageHeader: Detected catalog magic number in "
+            "next_page_id, fixing");
+        header->next_page_id = INVALID_PAGE_ID;
+        need_fix = true;
+    }
+    if (header->next_page_id != INVALID_PAGE_ID &&
+        (header->next_page_id < 2 || header->next_page_id > 1000000)) {
+        LOG_ERROR("ValidateAndFixTablePageHeader: Invalid next_page_id "
+                  << header->next_page_id << ", resetting to INVALID_PAGE_ID");
+        header->next_page_id = INVALID_PAGE_ID;
+        need_fix = true;
+    }
+    if (header->num_tuples < 0 || header->num_tuples > 1000) {
+        LOG_ERROR("ValidateAndFixTablePageHeader: Invalid num_tuples "
+                  << header->num_tuples << ", resetting to 0");
         header->num_tuples = 0;
         header->free_space_offset = PAGE_SIZE;
-        return false;
+        need_fix = true;
+    }
+    size_t min_offset =
+        sizeof(TablePage::TablePageHeader) + header->num_tuples * sizeof(Slot);
+    if (header->free_space_offset < min_offset ||
+        header->free_space_offset > PAGE_SIZE) {
+        LOG_ERROR("ValidateAndFixTablePageHeader: Invalid free_space_offset "
+                  << header->free_space_offset << ", fixing");
+        header->free_space_offset = PAGE_SIZE;
+        need_fix = true;
+    }
+    if (need_fix) {
+        LOG_DEBUG("ValidateAndFixTablePageHeader: Fixed header for page "
+                  << expected_page_id
+                  << " - next_page_id=" << header->next_page_id
+                  << " num_tuples=" << header->num_tuples
+                  << " free_space_offset=" << header->free_space_offset);
+    }
+    return !need_fix;
+}
+static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header,
+                                           char* page_data, page_id_t page_id) {
+    const size_t header_size = sizeof(TablePage::TablePageHeader);
+    const size_t slot_size = sizeof(Slot);
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: page "
+              << page_id << " num_tuples=" << header->num_tuples
+              << " free_space_offset=" << header->free_space_offset
+              << " next_page_id=" << header->next_page_id);
+    if (!ValidateAndFixTablePageHeader(header, page_id)) {
+        LOG_WARN("ValidateAndRepairSlotDirectory: Fixed corrupted header");
     }
     if (header->num_tuples == 0) {
         header->free_space_offset = PAGE_SIZE;
-        LOG_DEBUG("ValidateAndRepairSlotDirectory: empty page, reset free_space_offset to " << PAGE_SIZE);
+        LOG_DEBUG(
+            "ValidateAndRepairSlotDirectory: empty page, reset "
+            "free_space_offset");
         return true;
     }
     size_t slot_end_offset = header_size + header->num_tuples * slot_size;
     if (slot_end_offset > PAGE_SIZE) {
-        LOG_ERROR("ValidateAndRepairSlotDirectory: slot directory exceeds page size, resetting");
+        LOG_ERROR(
+            "ValidateAndRepairSlotDirectory: slot directory exceeds page size");
         header->num_tuples = 0;
         header->free_space_offset = PAGE_SIZE;
         return false;
@@ -5858,22 +5996,21 @@ static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, c
     size_t calculated_free_offset = PAGE_SIZE;
     int valid_tuples = 0;
     for (int i = 0; i < header->num_tuples; i++) {
-        LOG_TRACE("ValidateAndRepairSlotDirectory: checking slot " << i 
-                  << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
         if (slots[i].size > 0) {
-            if (slots[i].offset >= slot_end_offset && 
-                slots[i].offset < PAGE_SIZE &&
-                slots[i].size <= PAGE_SIZE &&
+            if (slots[i].offset >= slot_end_offset &&
+                slots[i].offset < PAGE_SIZE && slots[i].size <= PAGE_SIZE &&
                 slots[i].offset + slots[i].size <= PAGE_SIZE) {
-                calculated_free_offset = std::min(calculated_free_offset, static_cast<size_t>(slots[i].offset));
+                calculated_free_offset =
+                    std::min(calculated_free_offset,
+                             static_cast<size_t>(slots[i].offset));
                 if (valid_tuples != i) {
-                    LOG_DEBUG("ValidateAndRepairSlotDirectory: moving slot " << i << " to position " << valid_tuples);
                     slots[valid_tuples] = slots[i];
                 }
                 valid_tuples++;
             } else {
-                LOG_DEBUG("ValidateAndRepairSlotDirectory: removing invalid slot " << i 
-                          << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
+                LOG_DEBUG(
+                    "ValidateAndRepairSlotDirectory: removing invalid slot "
+                    << i);
             }
         }
     }
@@ -5882,36 +6019,34 @@ static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, c
         slots[i].size = 0;
     }
     header->num_tuples = valid_tuples;
-    slot_end_offset = header_size + header->num_tuples * slot_size;
-    if (calculated_free_offset < slot_end_offset) {
+    if (calculated_free_offset < header_size + valid_tuples * slot_size) {
         calculated_free_offset = PAGE_SIZE;
-        LOG_WARN("ValidateAndRepairSlotDirectory: page appears full, no free space available");
     }
-    if (header->free_space_offset > PAGE_SIZE || header->free_space_offset < slot_end_offset) {
-        LOG_DEBUG("ValidateAndRepairSlotDirectory: correcting invalid free_space_offset from " 
-                  << header->free_space_offset << " to " << calculated_free_offset);
-        header->free_space_offset = calculated_free_offset;
-    }
-    LOG_DEBUG("ValidateAndRepairSlotDirectory: validated page with " << valid_tuples 
-              << " valid tuples, slot_end=" << slot_end_offset 
-              << ", free_offset=" << header->free_space_offset);
+    header->free_space_offset = calculated_free_offset;
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: page "
+              << page_id << " validated with " << valid_tuples
+              << " valid tuples"
+              << " free_offset=" << header->free_space_offset);
     return true;
 }
 bool TablePage::DeleteTuple(const RID& rid) {
     auto* header = GetHeader();
     if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
-        LOG_DEBUG("TablePage::DeleteTuple: Invalid slot number " << rid.slot_num);
+        LOG_DEBUG("TablePage::DeleteTuple: Invalid slot number "
+                  << rid.slot_num);
         return false;
     }
     const size_t header_size = sizeof(TablePageHeader);
     Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
-        LOG_DEBUG("TablePage::DeleteTuple: Slot " << rid.slot_num << " already empty");
+        LOG_DEBUG("TablePage::DeleteTuple: Slot " << rid.slot_num
+                                                  << " already empty");
         return false;
     }
     slots[rid.slot_num].size = 0;
     slots[rid.slot_num].offset = 0;
-    LOG_DEBUG("TablePage::DeleteTuple: Successfully deleted tuple at slot " << rid.slot_num);
+    LOG_DEBUG("TablePage::DeleteTuple: Successfully deleted tuple at slot "
+              << rid.slot_num);
     return true;
 }
 bool TablePage::UpdateTuple(const Tuple& tuple, const RID& rid) {
@@ -5965,51 +6100,56 @@ bool TablePage::GetTuple(const RID& rid, Tuple* tuple, const Schema* schema) {
         LOG_ERROR("TablePage::GetTuple: null header");
         return false;
     }
-    LOG_DEBUG("TablePage::GetTuple: Attempting to get tuple from slot " 
-              << rid.slot_num << " (total slots: " << header->num_tuples << ")");
+    LOG_DEBUG("TablePage::GetTuple: Attempting to get tuple from slot "
+              << rid.slot_num << " (total slots: " << header->num_tuples
+              << ")");
     if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
-        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
-                  << " out of range [0, " << header->num_tuples << ")");
+        LOG_DEBUG("TablePage::GetTuple: slot "
+                  << rid.slot_num << " out of range [0, " << header->num_tuples
+                  << ")");
         return false;
     }
-    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+    if (!ValidateAndRepairSlotDirectory(header, GetData(), GetPageId())) {
         LOG_ERROR("TablePage::GetTuple: page structure validation failed");
         return false;
     }
     const size_t header_size = sizeof(TablePageHeader);
     Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
-        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num << " is deleted (size=0)");
+        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num
+                                               << " is deleted (size=0)");
         return false;
     }
-    LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
-              << " has offset=" << slots[rid.slot_num].offset 
+    LOG_DEBUG("TablePage::GetTuple: slot "
+              << rid.slot_num << " has offset=" << slots[rid.slot_num].offset
               << ", size=" << slots[rid.slot_num].size);
-    if (slots[rid.slot_num].offset < header_size || 
+    if (slots[rid.slot_num].offset < header_size ||
         slots[rid.slot_num].offset + slots[rid.slot_num].size > PAGE_SIZE) {
-        LOG_WARN("TablePage::GetTuple: invalid slot " << rid.slot_num 
-                 << " (offset=" << slots[rid.slot_num].offset 
+        LOG_WARN("TablePage::GetTuple: invalid slot "
+                 << rid.slot_num << " (offset=" << slots[rid.slot_num].offset
                  << ", size=" << slots[rid.slot_num].size << ")");
         return false;
     }
     char* tuple_data = GetData() + slots[rid.slot_num].offset;
     try {
-        LOG_DEBUG("TablePage::GetTuple: About to deserialize tuple data, schema has " 
-                  << schema->GetColumnCount() << " columns");
+        LOG_DEBUG(
+            "TablePage::GetTuple: About to deserialize tuple data, schema has "
+            << schema->GetColumnCount() << " columns");
         tuple->DeserializeFrom(tuple_data, schema);
         tuple->SetRID(rid);
-        LOG_DEBUG("TablePage::GetTuple: Successfully retrieved tuple from slot " 
-                  << rid.slot_num << " with " << tuple->GetValues().size() << " values");
+        LOG_DEBUG("TablePage::GetTuple: Successfully retrieved tuple from slot "
+                  << rid.slot_num << " with " << tuple->GetValues().size()
+                  << " values");
         return true;
     } catch (const std::exception& e) {
-        LOG_ERROR("TablePage::GetTuple: Failed to deserialize tuple from slot " 
+        LOG_ERROR("TablePage::GetTuple: Failed to deserialize tuple from slot "
                   << rid.slot_num << ": " << e.what());
         return false;
     }
 }
 bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     auto* header = GetHeader();
-    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+    if (!ValidateAndRepairSlotDirectory(header, GetData(), GetPageId())) {
         LOG_ERROR("TablePage::GetNextTupleRID: page corrupted, reinitializing");
         Init(GetPageId(), INVALID_PAGE_ID);
         return false;
@@ -6032,9 +6172,32 @@ bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     }
     return false;
 }
-page_id_t TablePage::GetNextPageId() const { return GetHeader()->next_page_id; }
+page_id_t TablePage::GetNextPageId() const {
+    auto* header = GetHeader();
+    TablePage::TablePageHeader temp_header = *header;
+    if (!ValidateAndFixTablePageHeader(&temp_header, GetPageId())) {
+        LOG_WARN("TablePage::GetNextPageId: Header corruption detected on page "
+                 << GetPageId() << ", using fixed value");
+        return temp_header.next_page_id;
+    }
+    return header->next_page_id;
+}
 void TablePage::SetNextPageId(page_id_t next_page_id) {
-    GetHeader()->next_page_id = next_page_id;
+    if (next_page_id != INVALID_PAGE_ID &&
+        (next_page_id < 2 || next_page_id > 1000000)) {
+        LOG_ERROR("TablePage::SetNextPageId: Invalid next_page_id "
+                  << next_page_id << " for page " << GetPageId());
+        return;
+    }
+    auto* header = GetHeader();
+    if (!ValidateAndFixTablePageHeader(header, GetPageId())) {
+        LOG_WARN(
+            "TablePage::SetNextPageId: Fixed corrupted header before setting "
+            "next_page_id");
+    }
+    header->next_page_id = next_page_id;
+    LOG_DEBUG("TablePage::SetNextPageId: Set next_page_id to "
+              << next_page_id << " on page " << GetPageId());
 }
 TablePage::TablePageHeader* TablePage::GetHeader() {
     return reinterpret_cast<TablePageHeader*>(GetData());
@@ -6051,11 +6214,20 @@ TableHeap::TableHeap(BufferPoolManager* buffer_pool_manager,
     if (first_page == nullptr) {
         throw Exception("Cannot allocate first page for table heap");
     }
+    if (first_page_id_ < 2) {
+        LOG_ERROR("TableHeap: Allocated reserved page " << first_page_id_
+                  << " for table, this should not happen");
+        buffer_pool_manager_->UnpinPage(first_page_id_, false);
+        buffer_pool_manager_->DeletePage(first_page_id_);
+        throw Exception("Allocated reserved page for table heap");
+    }
     first_page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(first_page);
     table_page->Init(first_page_id_, INVALID_PAGE_ID);
     first_page->WUnlatch();
     buffer_pool_manager_->UnpinPage(first_page_id_, true);
+    LOG_DEBUG("TableHeap: Created new table heap with first_page_id="
+              << first_page_id_);
 }
 TableHeap::TableHeap(BufferPoolManager* buffer_pool_manager,
                      const Schema* schema, page_id_t first_page_id)
@@ -6064,13 +6236,30 @@ TableHeap::TableHeap(BufferPoolManager* buffer_pool_manager,
       first_page_id_(first_page_id) {
     LOG_DEBUG("TableHeap: Creating TableHeap with existing first_page_id="
               << first_page_id);
+    if (first_page_id < 2) {
+        LOG_ERROR("TableHeap: Invalid first_page_id " << first_page_id
+                  << ", must be >= 2 (pages 0-1 are reserved)");
+        throw Exception("Invalid first page ID for table heap");
+    }
     Page* first_page = buffer_pool_manager_->FetchPage(first_page_id_);
     if (first_page == nullptr) {
         LOG_ERROR("TableHeap: Cannot fetch first page "
                   << first_page_id << " for table heap recovery");
         throw Exception("Cannot fetch first page for table heap recovery");
     }
-    LOG_DEBUG("TableHeap: Successfully fetched first page " << first_page_id);
+    first_page->RLatch();
+    auto* table_page = reinterpret_cast<TablePage*>(first_page);
+    auto* header = table_page->GetHeader();
+    if (!ValidateAndFixTablePageHeader(header, first_page_id)) {
+        LOG_WARN("TableHeap: Fixed corrupted header in first page " << first_page_id);
+        first_page->RUnlatch();
+        first_page->WLatch();
+        first_page->SetDirty(true);
+        first_page->WUnlatch();
+    } else {
+        first_page->RUnlatch();
+    }
+    LOG_DEBUG("TableHeap: Successfully validated first page " << first_page_id);
     buffer_pool_manager_->UnpinPage(first_page_id_, false);
     LOG_DEBUG("TableHeap: TableHeap created successfully");
 }
@@ -6113,7 +6302,8 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             if (new_table_page->InsertTuple(tuple, rid)) {
                 if (log_manager_ && txn_id != INVALID_TXN_ID) {
-                    InsertLogRecord log_record(txn_id, INVALID_LSN, *rid, tuple);
+                    InsertLogRecord log_record(txn_id, INVALID_LSN, *rid,
+                                               tuple);
                     lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
                     new_page->SetLSN(lsn);
                 } else {
@@ -6140,26 +6330,28 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
     size_t slot_size = sizeof(Slot);
     auto* header = GetHeader();
     const size_t header_size = sizeof(TablePageHeader);
-    LOG_DEBUG("TablePage::InsertTuple: page " << GetPageId() 
-              << " tuple_size=" << tuple_size
+    LOG_DEBUG("TablePage::InsertTuple: page "
+              << GetPageId() << " tuple_size=" << tuple_size
               << " current_tuples=" << header->num_tuples
               << " free_space_offset=" << header->free_space_offset);
     if (tuple_size == 0 || tuple_size > PAGE_SIZE / 2) {
         LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size);
         return false;
     }
-    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
-        LOG_ERROR("TablePage::InsertTuple: page severely corrupted, reinitializing");
+    if (!ValidateAndRepairSlotDirectory(header, GetData(), GetPageId())) {
+        LOG_ERROR(
+            "TablePage::InsertTuple: page severely corrupted, reinitializing");
         Init(GetPageId(), INVALID_PAGE_ID);
         header = GetHeader();
     }
-    size_t slot_end_offset = header_size + (header->num_tuples + 1) * slot_size;
+    size_t slot_end_offset =
+        header_size + (header->num_tuples + 1) * slot_size;
     size_t required_data_space = tuple_size;
     if (slot_end_offset + required_data_space > header->free_space_offset) {
         LOG_DEBUG("TablePage::InsertTuple: insufficient space. "
-                 << "slot_end=" << slot_end_offset 
-                 << " + data=" << required_data_space
-                 << " > free_offset=" << header->free_space_offset);
+                  << "slot_end=" << slot_end_offset
+                  << " + data=" << required_data_space
+                  << " > free_offset=" << header->free_space_offset);
         return false;
     }
     header->free_space_offset -= tuple_size;
@@ -6171,8 +6363,8 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
     rid->page_id = GetPageId();
     rid->slot_num = header->num_tuples;
     header->num_tuples++;
-    LOG_DEBUG("TablePage::InsertTuple: inserted at slot " << rid->slot_num 
-              << " offset=" << slots[rid->slot_num].offset
+    LOG_DEBUG("TablePage::InsertTuple: inserted at slot "
+              << rid->slot_num << " offset=" << slots[rid->slot_num].offset
               << " size=" << tuple_size);
     return true;
 }
@@ -6191,8 +6383,7 @@ bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
     bool result = table_page->DeleteTuple(rid);
     if (result) {
         if (log_manager_ && txn_id != INVALID_TXN_ID && got_tuple) {
-            Tuple empty_tuple;
-            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, deleted_tuple, empty_tuple);
+            DeleteLogRecord log_record(txn_id, INVALID_LSN, rid, deleted_tuple);
             lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
             page->SetLSN(lsn);
         } else {
@@ -6204,7 +6395,8 @@ bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
     return result;
 }
-bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id) {
+bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid,
+                            txn_id_t txn_id) {
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
         return false;
@@ -6219,7 +6411,8 @@ bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id)
     bool result = table_page->UpdateTuple(tuple, rid);
     if (result) {
         if (log_manager_ && txn_id != INVALID_TXN_ID && got_old_tuple) {
-            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, old_tuple, tuple);
+            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, old_tuple,
+                                       tuple);
             lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
             page->SetLSN(lsn);
         } else {
@@ -6257,13 +6450,22 @@ void TableHeap::Iterator::operator++() {
     Page* page =
         table_heap_->buffer_pool_manager_->FetchPage(current_rid_.page_id);
     if (page == nullptr) {
-        LOG_ERROR("TableHeap::Iterator: Cannot fetch page "
+        LOG_ERROR("TableHeap::Iterator: Cannot fetch current page "
                   << current_rid_.page_id);
         current_rid_.page_id = INVALID_PAGE_ID;
         return;
     }
     page->RLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
+    if (page->GetPageId() != current_rid_.page_id) {
+        LOG_ERROR("TableHeap::Iterator: Page ID mismatch, expected "
+                  << current_rid_.page_id << " but got " << page->GetPageId());
+        page->RUnlatch();
+        table_heap_->buffer_pool_manager_->UnpinPage(current_rid_.page_id,
+                                                     false);
+        current_rid_.page_id = INVALID_PAGE_ID;
+        return;
+    }
     RID next_rid;
     if (table_page->GetNextTupleRID(current_rid_, &next_rid)) {
         LOG_DEBUG("TableHeap::Iterator: found next tuple in same page: "
@@ -6284,15 +6486,32 @@ void TableHeap::Iterator::operator++() {
         current_rid_.page_id = INVALID_PAGE_ID;
         return;
     }
+    int total_pages =
+        table_heap_->buffer_pool_manager_->GetDiskManager()->GetNumPages();
+    if (next_page_id < 0 || next_page_id >= total_pages) {
+        LOG_ERROR("TableHeap::Iterator: Invalid next_page_id "
+                  << next_page_id << " (total pages: " << total_pages
+                  << "), ending iteration");
+        current_rid_.page_id = INVALID_PAGE_ID;
+        return;
+    }
     page = table_heap_->buffer_pool_manager_->FetchPage(next_page_id);
     if (page == nullptr) {
         LOG_ERROR("TableHeap::Iterator: Cannot fetch next page "
-                  << next_page_id);
+                  << next_page_id << " (total pages: " << total_pages << ")");
         current_rid_.page_id = INVALID_PAGE_ID;
         return;
     }
     page->RLatch();
     table_page = reinterpret_cast<TablePage*>(page);
+    if (page->GetPageId() != next_page_id) {
+        LOG_ERROR("TableHeap::Iterator: Next page ID mismatch, expected "
+                  << next_page_id << " but got " << page->GetPageId());
+        page->RUnlatch();
+        table_heap_->buffer_pool_manager_->UnpinPage(next_page_id, false);
+        current_rid_.page_id = INVALID_PAGE_ID;
+        return;
+    }
     RID first_rid{next_page_id, -1};
     if (table_page->GetNextTupleRID(first_rid, &next_rid)) {
         LOG_DEBUG("TableHeap::Iterator: found first tuple in next page: "
@@ -6302,11 +6521,13 @@ void TableHeap::Iterator::operator++() {
         table_heap_->buffer_pool_manager_->UnpinPage(next_page_id, false);
         return;
     }
-    LOG_DEBUG("TableHeap::Iterator: next page " << next_page_id
-                                                << " has no tuples");
+    LOG_DEBUG("TableHeap::Iterator: next page "
+              << next_page_id << " has no tuples, continuing search");
     page->RUnlatch();
     table_heap_->buffer_pool_manager_->UnpinPage(next_page_id, false);
-    current_rid_.page_id = INVALID_PAGE_ID;
+    current_rid_.page_id = next_page_id;
+    current_rid_.slot_num = -1;
+    operator++();
 }
 Tuple TableHeap::Iterator::operator*() {
     Tuple tuple;
@@ -6321,6 +6542,12 @@ TableHeap::Iterator TableHeap::Begin() {
             "TableHeap::Begin: Invalid first page ID, returning end iterator");
         return Iterator(this, RID{INVALID_PAGE_ID, -1});
     }
+    int total_pages = buffer_pool_manager_->GetDiskManager()->GetNumPages();
+    if (first_page_id_ < 0 || first_page_id_ >= total_pages) {
+        LOG_ERROR("TableHeap::Begin: Invalid first_page_id "
+                  << first_page_id_ << " (total pages: " << total_pages << ")");
+        return Iterator(this, RID{INVALID_PAGE_ID, -1});
+    }
     Page* first_page = buffer_pool_manager_->FetchPage(first_page_id_);
     if (first_page == nullptr) {
         LOG_ERROR("TableHeap::Begin: Cannot fetch first page "
@@ -6329,6 +6556,21 @@ TableHeap::Iterator TableHeap::Begin() {
     }
     first_page->RLatch();
     auto* table_page = reinterpret_cast<TablePage*>(first_page);
+    if (first_page->GetPageId() != first_page_id_) {
+        LOG_ERROR("TableHeap::Begin: Page ID mismatch, expected "
+                  << first_page_id_ << " but got " << first_page->GetPageId());
+        first_page->RUnlatch();
+        buffer_pool_manager_->UnpinPage(first_page_id_, false);
+        return Iterator(this, RID{INVALID_PAGE_ID, -1});
+    }
+    auto* header = table_page->GetHeader();
+    if (header->num_tuples < 0 || header->num_tuples > 10000) {
+        LOG_ERROR("TableHeap::Begin: Invalid num_tuples " << header->num_tuples
+                                                          << " in first page");
+        first_page->RUnlatch();
+        buffer_pool_manager_->UnpinPage(first_page_id_, false);
+        return Iterator(this, RID{INVALID_PAGE_ID, -1});
+    }
     RID first_valid_rid;
     RID start_rid{first_page_id_, -1};
     bool found = table_page->GetNextTupleRID(start_rid, &first_valid_rid);
@@ -6349,6 +6591,7 @@ TableHeap::Iterator TableHeap::End() {
 }
 }
 
+
 ========== ./src/record/tuple.cpp ==========
 namespace SimpleRDBMS {
 Tuple::Tuple(std::vector<Value> values, const Schema* schema)
@@ -6357,8 +6600,9 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
     if (!schema) {
         throw std::runtime_error("Schema cannot be null");
     }
-    LOG_DEBUG("Tuple construction: values count=" << values_.size() 
-              << ", schema columns=" << schema->GetColumnCount());
+    LOG_DEBUG("Tuple construction: values count=" << values_.size()
+                                                  << ", schema columns="
+                                                  << schema->GetColumnCount());
     if (values_.size() != schema->GetColumnCount()) {
         LOG_ERROR("Tuple construction: Value count "
                   << values_.size() << " doesn't match schema column count "
@@ -6372,8 +6616,9 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
         }
         const auto& column = schema->GetColumn(i);
         Value& value = values_[i];
-        LOG_DEBUG("Tuple construction: Processing column " << i 
-                  << " (" << column.name << ") type=" << static_cast<int>(column.type));
+        LOG_DEBUG("Tuple construction: Processing column "
+                  << i << " (" << column.name
+                  << ") type=" << static_cast<int>(column.type));
         try {
             switch (column.type) {
                 case TypeId::BOOLEAN: {
@@ -6381,14 +6626,19 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                         if (std::holds_alternative<int32_t>(value)) {
                             bool converted = std::get<int32_t>(value) != 0;
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to bool: " << converted);
+                            LOG_DEBUG(
+                                "Converted int32_t to bool: " << converted);
                         } else if (std::holds_alternative<std::string>(value)) {
-                            const std::string& str = std::get<std::string>(value);
-                            bool converted = (str == "TRUE" || str == "true" || str == "1");
+                            const std::string& str =
+                                std::get<std::string>(value);
+                            bool converted =
+                                (str == "TRUE" || str == "true" || str == "1");
                             value = Value(converted);
-                            LOG_DEBUG("Converted string '" << str << "' to bool: " << converted);
+                            LOG_DEBUG("Converted string '"
+                                      << str << "' to bool: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to BOOLEAN");
+                            throw std::runtime_error(
+                                "Cannot convert value to BOOLEAN");
                         }
                     }
                     serialized_size_ += sizeof(bool);
@@ -6397,11 +6647,14 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::TINYINT: {
                     if (!std::holds_alternative<int8_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int8_t converted = static_cast<int8_t>(std::get<int32_t>(value));
+                            int8_t converted =
+                                static_cast<int8_t>(std::get<int32_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to int8_t: " << static_cast<int>(converted));
+                            LOG_DEBUG("Converted int32_t to int8_t: "
+                                      << static_cast<int>(converted));
                         } else {
-                            throw std::runtime_error("Cannot convert value to TINYINT");
+                            throw std::runtime_error(
+                                "Cannot convert value to TINYINT");
                         }
                     }
                     serialized_size_ += sizeof(int8_t);
@@ -6410,11 +6663,14 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::SMALLINT: {
                     if (!std::holds_alternative<int16_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int16_t converted = static_cast<int16_t>(std::get<int32_t>(value));
+                            int16_t converted =
+                                static_cast<int16_t>(std::get<int32_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to int16_t: " << converted);
+                            LOG_DEBUG(
+                                "Converted int32_t to int16_t: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to SMALLINT");
+                            throw std::runtime_error(
+                                "Cannot convert value to SMALLINT");
                         }
                     }
                     serialized_size_ += sizeof(int16_t);
@@ -6423,19 +6679,26 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::INTEGER: {
                     if (!std::holds_alternative<int32_t>(value)) {
                         if (std::holds_alternative<int64_t>(value)) {
-                            int32_t converted = static_cast<int32_t>(std::get<int64_t>(value));
+                            int32_t converted =
+                                static_cast<int32_t>(std::get<int64_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int64_t to int32_t: " << converted);
+                            LOG_DEBUG(
+                                "Converted int64_t to int32_t: " << converted);
                         } else if (std::holds_alternative<int16_t>(value)) {
-                            int32_t converted = static_cast<int32_t>(std::get<int16_t>(value));
+                            int32_t converted =
+                                static_cast<int32_t>(std::get<int16_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int16_t to int32_t: " << converted);
+                            LOG_DEBUG(
+                                "Converted int16_t to int32_t: " << converted);
                         } else if (std::holds_alternative<int8_t>(value)) {
-                            int32_t converted = static_cast<int32_t>(std::get<int8_t>(value));
+                            int32_t converted =
+                                static_cast<int32_t>(std::get<int8_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int8_t to int32_t: " << converted);
+                            LOG_DEBUG(
+                                "Converted int8_t to int32_t: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to INTEGER");
+                            throw std::runtime_error(
+                                "Cannot convert value to INTEGER");
                         }
                     }
                     serialized_size_ += sizeof(int32_t);
@@ -6444,11 +6707,14 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::BIGINT: {
                     if (!std::holds_alternative<int64_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int64_t converted = static_cast<int64_t>(std::get<int32_t>(value));
+                            int64_t converted =
+                                static_cast<int64_t>(std::get<int32_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to int64_t: " << converted);
+                            LOG_DEBUG(
+                                "Converted int32_t to int64_t: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to BIGINT");
+                            throw std::runtime_error(
+                                "Cannot convert value to BIGINT");
                         }
                     }
                     serialized_size_ += sizeof(int64_t);
@@ -6457,15 +6723,20 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::FLOAT: {
                     if (!std::holds_alternative<float>(value)) {
                         if (std::holds_alternative<double>(value)) {
-                            float converted = static_cast<float>(std::get<double>(value));
+                            float converted =
+                                static_cast<float>(std::get<double>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted double to float: " << converted);
+                            LOG_DEBUG(
+                                "Converted double to float: " << converted);
                         } else if (std::holds_alternative<int32_t>(value)) {
-                            float converted = static_cast<float>(std::get<int32_t>(value));
+                            float converted =
+                                static_cast<float>(std::get<int32_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to float: " << converted);
+                            LOG_DEBUG(
+                                "Converted int32_t to float: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to FLOAT");
+                            throw std::runtime_error(
+                                "Cannot convert value to FLOAT");
                         }
                     }
                     serialized_size_ += sizeof(float);
@@ -6474,15 +6745,20 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::DOUBLE: {
                     if (!std::holds_alternative<double>(value)) {
                         if (std::holds_alternative<float>(value)) {
-                            double converted = static_cast<double>(std::get<float>(value));
+                            double converted =
+                                static_cast<double>(std::get<float>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted float to double: " << converted);
+                            LOG_DEBUG(
+                                "Converted float to double: " << converted);
                         } else if (std::holds_alternative<int32_t>(value)) {
-                            double converted = static_cast<double>(std::get<int32_t>(value));
+                            double converted =
+                                static_cast<double>(std::get<int32_t>(value));
                             value = Value(converted);
-                            LOG_DEBUG("Converted int32_t to double: " << converted);
+                            LOG_DEBUG(
+                                "Converted int32_t to double: " << converted);
                         } else {
-                            throw std::runtime_error("Cannot convert value to DOUBLE");
+                            throw std::runtime_error(
+                                "Cannot convert value to DOUBLE");
                         }
                     }
                     serialized_size_ += sizeof(double);
@@ -6491,11 +6767,13 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::VARCHAR: {
                     if (!std::holds_alternative<std::string>(value)) {
                         throw std::runtime_error(
-                            "Cannot convert value to VARCHAR for column " + column.name);
+                            "Cannot convert value to VARCHAR for column " +
+                            column.name);
                     }
                     const std::string& str = std::get<std::string>(value);
                     serialized_size_ += sizeof(uint32_t) + str.size();
-                    LOG_DEBUG("VARCHAR column '" << column.name << "' length: " << str.size());
+                    LOG_DEBUG("VARCHAR column '" << column.name
+                                                 << "' length: " << str.size());
                     break;
                 }
                 default:
@@ -6508,8 +6786,9 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
             throw;
         }
     }
-    LOG_DEBUG("Tuple construction completed: " << values_.size() 
-              << " values, serialized_size=" << serialized_size_);
+    LOG_DEBUG("Tuple construction completed: " << values_.size()
+                                               << " values, serialized_size="
+                                               << serialized_size_);
 }
 void Tuple::SerializeTo(char* data) const {
     size_t offset = 0;
@@ -6625,7 +6904,8 @@ void Tuple::DeserializeFrom(const char* data, const Schema* schema) {
                     std::memcpy(&len, data + offset, sizeof(uint32_t));
                     offset += sizeof(uint32_t);
                     if (len > MAX_TUPLE_SIZE) {
-                        LOG_ERROR("Tuple::DeserializeFrom: VARCHAR length " << len << " exceeds maximum");
+                        LOG_ERROR("Tuple::DeserializeFrom: VARCHAR length "
+                                  << len << " exceeds maximum");
                         values_.clear();
                         serialized_size_ = 0;
                         return;
@@ -6637,17 +6917,20 @@ void Tuple::DeserializeFrom(const char* data, const Schema* schema) {
                     break;
                 }
                 default:
-                    LOG_ERROR("Tuple::DeserializeFrom: Unsupported column type: " 
-                              << static_cast<int>(column.type));
+                    LOG_ERROR(
+                        "Tuple::DeserializeFrom: Unsupported column type: "
+                        << static_cast<int>(column.type));
                     values_.clear();
                     serialized_size_ = 0;
                     return;
             }
         }
-        LOG_DEBUG("Tuple::DeserializeFrom: Successfully deserialized " 
-                  << values_.size() << " values, total size: " << serialized_size_);
+        LOG_DEBUG("Tuple::DeserializeFrom: Successfully deserialized "
+                  << values_.size()
+                  << " values, total size: " << serialized_size_);
     } catch (const std::exception& e) {
-        LOG_ERROR("Tuple::DeserializeFrom: Exception during deserialization: " << e.what());
+        LOG_ERROR("Tuple::DeserializeFrom: Exception during deserialization: "
+                  << e.what());
         values_.clear();
         serialized_size_ = 0;
         throw;
@@ -6663,6 +6946,7 @@ Value Tuple::GetValue(size_t index) const {
     return values_[index];
 }
 }
+
 
 ========== ./src/recovery/log_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -6700,20 +6984,22 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
     }
     std::unique_lock<std::mutex> lock(latch_);
     lsn_t lsn = next_lsn_.fetch_add(1);
-    size_t header_size = sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t);
+    size_t header_size =
+        sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t);
     size_t record_data_size = log_record->GetLogRecordSize();
     size_t total_record_size = header_size + record_data_size;
     size_t total_size_with_length = sizeof(uint32_t) + total_record_size;
-    LOG_DEBUG("AppendLogRecord: LSN=" << lsn 
-              << ", type=" << static_cast<int>(log_record->GetType())
-              << ", txn=" << log_record->GetTxnId()
-              << ", size=" << total_size_with_length);
+    LOG_DEBUG("AppendLogRecord: LSN=" << lsn << ", type="
+                                      << static_cast<int>(log_record->GetType())
+                                      << ", txn=" << log_record->GetTxnId()
+                                      << ", size=" << total_size_with_length);
     if (log_buffer_offset_ + total_size_with_length > log_buffer_size_) {
         LOG_DEBUG("Log buffer full, flushing before append");
         FlushLogBuffer();
     }
     char* buffer_ptr = log_buffer_ + log_buffer_offset_;
-    *reinterpret_cast<uint32_t*>(buffer_ptr) = static_cast<uint32_t>(total_record_size);
+    *reinterpret_cast<uint32_t*>(buffer_ptr) =
+        static_cast<uint32_t>(total_record_size);
     buffer_ptr += sizeof(uint32_t);
     *reinterpret_cast<LogRecordType*>(buffer_ptr) = log_record->GetType();
     buffer_ptr += sizeof(LogRecordType);
@@ -6733,7 +7019,8 @@ void LogManager::Flush(lsn_t lsn) {
         LOG_DEBUG("Log buffer empty, nothing to flush");
         return;
     }
-    LOG_DEBUG("Flushing log buffer to disk, buffer size: " << log_buffer_offset_);
+    LOG_DEBUG(
+        "Flushing log buffer to disk, buffer size: " << log_buffer_offset_);
     try {
         FlushLogBuffer();
         if (lsn != -1) {
@@ -6741,7 +7028,8 @@ void LogManager::Flush(lsn_t lsn) {
         } else {
             persistent_lsn_.store(next_lsn_.load() - 1);
         }
-        LOG_DEBUG("Log flush completed, persistent LSN: " << persistent_lsn_.load());
+        LOG_DEBUG(
+            "Log flush completed, persistent LSN: " << persistent_lsn_.load());
     } catch (const std::exception& e) {
         LOG_ERROR("Exception during log flush: " << e.what());
         throw;
@@ -6757,8 +7045,8 @@ void LogManager::FlushLogBuffer() {
         memset(page_buffer, 0, PAGE_SIZE);
         memcpy(page_buffer, log_buffer_, log_buffer_offset_);
         disk_manager_->WritePage(log_page_id, page_buffer);
-        LOG_DEBUG("Log buffer flushed to page " << log_page_id 
-                  << ", bytes written: " << log_buffer_offset_);
+        LOG_DEBUG("Log buffer flushed to page "
+                  << log_page_id << ", bytes written: " << log_buffer_offset_);
         log_buffer_offset_ = 0;
         memset(log_buffer_, 0, log_buffer_size_);
         current_log_page_id_ = log_page_id;
@@ -6773,7 +7061,8 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
     std::unique_lock<std::mutex> lock(latch_);
     std::vector<std::unique_ptr<LogRecord>> log_records;
     int total_pages = disk_manager_->GetNumPages();
-    LOG_DEBUG("ReadLogRecords: Scanning " << total_pages << " pages for log records");
+    LOG_DEBUG("ReadLogRecords: Scanning " << total_pages
+                                          << " pages for log records");
     if (total_pages <= 0) {
         LOG_DEBUG("No pages on disk, no log records to read");
         return log_records;
@@ -6783,7 +7072,8 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
             char page_buffer[PAGE_SIZE];
             disk_manager_->ReadPage(page_id, page_buffer);
             if (page_id > 0) {
-                uint32_t first_record_size = *reinterpret_cast<uint32_t*>(page_buffer);
+                uint32_t first_record_size =
+                    *reinterpret_cast<uint32_t*>(page_buffer);
                 if (first_record_size == 0 || first_record_size > PAGE_SIZE) {
                     continue;
                 }
@@ -6791,20 +7081,26 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
             size_t offset = 0;
             int records_in_page = 0;
             while (offset + sizeof(uint32_t) <= PAGE_SIZE) {
-                uint32_t record_size = *reinterpret_cast<uint32_t*>(page_buffer + offset);
-                if (record_size == 0 || record_size > PAGE_SIZE || 
+                uint32_t record_size =
+                    *reinterpret_cast<uint32_t*>(page_buffer + offset);
+                if (record_size == 0 || record_size > PAGE_SIZE ||
                     offset + sizeof(uint32_t) + record_size > PAGE_SIZE) {
                     break;
                 }
                 offset += sizeof(uint32_t);
-                if (offset + sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t) > PAGE_SIZE) {
+                if (offset + sizeof(LogRecordType) + sizeof(txn_id_t) +
+                        sizeof(lsn_t) >
+                    PAGE_SIZE) {
                     break;
                 }
-                LogRecordType type = *reinterpret_cast<LogRecordType*>(page_buffer + offset);
+                LogRecordType type =
+                    *reinterpret_cast<LogRecordType*>(page_buffer + offset);
                 offset += sizeof(LogRecordType);
-                txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(page_buffer + offset);
+                txn_id_t txn_id =
+                    *reinterpret_cast<txn_id_t*>(page_buffer + offset);
                 offset += sizeof(txn_id_t);
-                lsn_t prev_lsn = *reinterpret_cast<lsn_t*>(page_buffer + offset);
+                lsn_t prev_lsn =
+                    *reinterpret_cast<lsn_t*>(page_buffer + offset);
                 offset += sizeof(lsn_t);
                 std::unique_ptr<LogRecord> record;
                 switch (type) {
@@ -6813,27 +7109,55 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
                         LOG_DEBUG("Found BEGIN record for txn " << txn_id);
                         break;
                     case LogRecordType::COMMIT:
-                        record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
+                        record =
+                            std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
                         LOG_DEBUG("Found COMMIT record for txn " << txn_id);
                         break;
                     case LogRecordType::ABORT:
-                        record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
+                        record =
+                            std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
                         LOG_DEBUG("Found ABORT record for txn " << txn_id);
                         break;
                     case LogRecordType::INSERT:
-                    case LogRecordType::UPDATE:
-                    case LogRecordType::DELETE:
-                        LOG_DEBUG("Found " << static_cast<int>(type) << " record for txn " << txn_id);
+                        LOG_DEBUG("Found INSERT record for txn " << txn_id);
                         {
-                            size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                            size_t remaining_size =
+                                record_size - sizeof(LogRecordType) -
+                                sizeof(txn_id_t) - sizeof(lsn_t);
                             offset += remaining_size;
-                            record = std::make_unique<BeginLogRecord>(txn_id);
+                            record = std::make_unique<BeginLogRecord>(
+                                txn_id);
+                        }
+                        break;
+                    case LogRecordType::UPDATE:
+                        LOG_DEBUG("Found UPDATE record for txn " << txn_id);
+                        {
+                            size_t remaining_size =
+                                record_size - sizeof(LogRecordType) -
+                                sizeof(txn_id_t) - sizeof(lsn_t);
+                            offset += remaining_size;
+                            record = std::make_unique<BeginLogRecord>(
+                                txn_id);
+                        }
+                        break;
+                    case LogRecordType::DELETE:
+                        LOG_DEBUG("Found DELETE record for txn " << txn_id);
+                        {
+                            size_t remaining_size =
+                                record_size - sizeof(LogRecordType) -
+                                sizeof(txn_id_t) - sizeof(lsn_t);
+                            offset += remaining_size;
+                            record = std::make_unique<BeginLogRecord>(
+                                txn_id);
                         }
                         break;
                     default:
-                        LOG_DEBUG("Unknown log record type: " << static_cast<int>(type));
+                        LOG_DEBUG("Unknown log record type: "
+                                  << static_cast<int>(type));
                         {
-                            size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                            size_t remaining_size =
+                                record_size - sizeof(LogRecordType) -
+                                sizeof(txn_id_t) - sizeof(lsn_t);
                             offset += remaining_size;
                         }
                         continue;
@@ -6844,17 +7168,20 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
                 }
             }
             if (records_in_page > 0) {
-                LOG_DEBUG("Found " << records_in_page << " records in page " << page_id);
+                LOG_DEBUG("Found " << records_in_page << " records in page "
+                                   << page_id);
             }
         } catch (const std::exception& e) {
             LOG_DEBUG("Exception reading page " << page_id << ": " << e.what());
             continue;
         }
     }
-    LOG_DEBUG("ReadLogRecords: Found " << log_records.size() << " total log records");
+    LOG_DEBUG("ReadLogRecords: Found " << log_records.size()
+                                       << " total log records");
     return log_records;
 }
 }
+
 
 ========== ./src/recovery/log_record.cpp ==========
 namespace SimpleRDBMS {
@@ -6897,16 +7224,24 @@ void UpdateLogRecord::SerializeTo(char* buffer) const {
     buffer += old_tuple_.GetSerializedSize();
     new_tuple_.SerializeTo(buffer);
 }
+void DeleteLogRecord::SerializeTo(char* buffer) const {
+    *reinterpret_cast<page_id_t*>(buffer) = rid_.page_id;
+    buffer += sizeof(page_id_t);
+    *reinterpret_cast<slot_offset_t*>(buffer) = rid_.slot_num;
+    buffer += sizeof(slot_offset_t);
+    deleted_tuple_.SerializeTo(buffer);
+}
 void BeginLogRecord::SerializeTo(char* buffer) const {
-    (void) buffer;
+    (void)buffer;
 }
 void CommitLogRecord::SerializeTo(char* buffer) const {
-    (void) buffer;
+    (void)buffer;
 }
 void AbortLogRecord::SerializeTo(char* buffer) const {
-    (void) buffer;
+    (void)buffer;
 }
 }
+
 
 ========== ./src/recovery/recovery_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -7045,12 +7380,18 @@ void RecoveryManager::RedoPhase(
     for (const auto& log_record : log_records) {
         switch (log_record->GetType()) {
             case LogRecordType::INSERT:
+                RedoInsert(
+                    static_cast<const InsertLogRecord*>(log_record.get()));
                 redo_operations++;
                 break;
             case LogRecordType::UPDATE:
+                RedoUpdate(
+                    static_cast<const UpdateLogRecord*>(log_record.get()));
                 redo_operations++;
                 break;
             case LogRecordType::DELETE:
+                RedoDelete(
+                    static_cast<const DeleteLogRecord*>(log_record.get()));
                 redo_operations++;
                 break;
             default:
@@ -7111,7 +7452,25 @@ void RecoveryManager::UndoUpdate(const UpdateLogRecord* log_record) {
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, updated);
 }
-void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
+void RecoveryManager::RedoDelete(const DeleteLogRecord* log_record) {
+    RID rid = log_record->GetRID();
+    Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
+    if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for redo delete");
+        return;
+    }
+    page->WLatch();
+    auto* table_page = reinterpret_cast<TablePage*>(page);
+    bool deleted = table_page->DeleteTuple(rid);
+    if (deleted) {
+        page->SetDirty(true);
+        LOG_DEBUG("Redo delete: deleted tuple at RID " << rid.page_id << ":"
+                                                       << rid.slot_num);
+    }
+    page->WUnlatch();
+    buffer_pool_manager_->UnpinPage(rid.page_id, deleted);
+}
+void RecoveryManager::UndoDelete(const DeleteLogRecord* log_record) {
     RID rid = log_record->GetRID();
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
@@ -7120,9 +7479,9 @@ void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
     }
     page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
-    Tuple old_tuple = log_record->GetOldTuple();
+    Tuple deleted_tuple = log_record->GetDeletedTuple();
     RID new_rid;
-    bool inserted = table_page->InsertTuple(old_tuple, &new_rid);
+    bool inserted = table_page->InsertTuple(deleted_tuple, &new_rid);
     if (inserted) {
         page->SetDirty(true);
         LOG_DEBUG("Undo delete: re-inserted tuple at RID "
@@ -7135,6 +7494,7 @@ void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
     buffer_pool_manager_->UnpinPage(rid.page_id, inserted);
 }
 }
+
 
 ========== ./src/storage/disk_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -7198,14 +7558,21 @@ void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
     }
     db_file_.seekp(offset);
     db_file_.write(page_data, PAGE_SIZE);
+    LOG_DEBUG("Writing page " << page_id << " to disk at offset " << offset);
     if (db_file_.bad()) {
-        throw StorageException("Failed to write page: " + std::to_string(page_id));
+        throw StorageException("Failed to write page: " +
+                               std::to_string(page_id));
     }
     db_file_.flush();
-    int fd = fileno(fopen(db_file_name_.c_str(), "r"));
-    if (fd != -1) {
-        fsync(fd);
-        close(fd);
+    LOG_DEBUG("Flushed page " << page_id << " to disk");
+    FILE* file = fopen(db_file_name_.c_str(), "r+");
+    if (file != nullptr) {
+        int fd = fileno(file);
+        if (fd != -1) {
+            LOG_DEBUG("Calling fsync on file descriptor " << fd);
+            fsync(fd);
+        }
+        fclose(file);
     }
     if (page_id >= num_pages_) {
         num_pages_ = page_id + 1;
@@ -7213,36 +7580,66 @@ void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
             next_page_id_ = page_id + 1;
         }
     }
-    LOG_DEBUG("Successfully wrote page " << page_id << " to disk at offset " << offset);
+    LOG_DEBUG("Successfully wrote page " << page_id << " to disk at offset "
+                                         << offset);
 }
 page_id_t DiskManager::AllocatePage() {
     std::lock_guard<std::mutex> lock(latch_);
+    const page_id_t RESERVED_PAGES = 2;
+    if (next_page_id_ < RESERVED_PAGES && num_pages_ <= RESERVED_PAGES) {
+        next_page_id_ = RESERVED_PAGES;
+        num_pages_ = std::max(num_pages_, RESERVED_PAGES);
+        LOG_DEBUG("AllocatePage: Initialized next_page_id to "
+                  << next_page_id_);
+    }
     if (!free_pages_.empty()) {
         page_id_t reused_page = free_pages_.back();
         free_pages_.pop_back();
-        LOG_DEBUG("Reusing deallocated page " << reused_page);
-        return reused_page;
+        if (reused_page < RESERVED_PAGES) {
+            LOG_WARN("AllocatePage: Attempted to reuse reserved page "
+                     << reused_page << ", allocating new page instead");
+        } else {
+            LOG_DEBUG("AllocatePage: Reusing deallocated page " << reused_page);
+            return reused_page;
+        }
     }
     page_id_t new_page_id = next_page_id_++;
+    if (new_page_id < RESERVED_PAGES) {
+        new_page_id = next_page_id_ = RESERVED_PAGES;
+        next_page_id_++;
+    }
     num_pages_ = std::max(num_pages_, next_page_id_);
-    LOG_DEBUG("Allocated new page " << new_page_id);
+    LOG_DEBUG("AllocatePage: Allocated new page " << new_page_id);
     return new_page_id;
 }
 void DiskManager::DeallocatePage(page_id_t page_id) {
     std::lock_guard<std::mutex> lock(latch_);
+    const page_id_t RESERVED_PAGES = 2;
+    if (page_id < RESERVED_PAGES) {
+        LOG_WARN("DeallocatePage: Attempted to deallocate reserved page "
+                 << page_id << ", ignoring");
+        return;
+    }
     if (page_id >= 0 && page_id < next_page_id_) {
         free_pages_.push_back(page_id);
-        LOG_DEBUG("Deallocated page " << page_id << " (added to free list)");
+        LOG_DEBUG("DeallocatePage: Deallocated page "
+                  << page_id << " (added to free list)");
     }
 }
 }
 
+
 ========== ./src/storage/page.cpp ==========
 namespace SimpleRDBMS {
-Page::Page() : page_id_(INVALID_PAGE_ID), pin_count_(0), is_dirty_(false), lsn_(INVALID_LSN) {
+Page::Page()
+    : page_id_(INVALID_PAGE_ID),
+      pin_count_(0),
+      is_dirty_(false),
+      lsn_(INVALID_LSN) {
 }
 Page::~Page() = default;
 }
+
 
 ========== ./src/transaction/lock_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -7252,10 +7649,8 @@ bool LockManager::LockShared(Transaction* txn, const RID& rid) {
         txn->SetState(TransactionState::ABORTED);
         return false;
     }
-    if (txn->GetExclusiveLockSet().count(rid) > 0) {
-        return true;
-    }
-    if (txn->GetSharedLockSet().count(rid) > 0) {
+    if (txn->GetExclusiveLockSet().count(rid) > 0 ||
+        txn->GetSharedLockSet().count(rid) > 0) {
         return true;
     }
     if (lock_table_.find(rid) == lock_table_.end()) {
@@ -7276,8 +7671,9 @@ bool LockManager::LockShared(Transaction* txn, const RID& rid) {
     queue->request_queue.push_back(std::move(request));
     auto timeout = std::chrono::milliseconds(100);
     if (queue->cv.wait_for(lock, timeout, [&]() {
-        return CheckAbort(txn) || GrantLock(queue->request_queue.back().get(), queue);
-    })) {
+            return CheckAbort(txn) ||
+                   GrantLock(queue->request_queue.back().get(), queue);
+        })) {
         if (CheckAbort(txn)) {
             queue->request_queue.pop_back();
             return false;
@@ -7316,8 +7712,9 @@ bool LockManager::LockExclusive(Transaction* txn, const RID& rid) {
     queue->request_queue.push_back(std::move(request));
     auto timeout = std::chrono::milliseconds(100);
     if (queue->cv.wait_for(lock, timeout, [&]() {
-        return CheckAbort(txn) || GrantLock(queue->request_queue.back().get(), queue);
-    })) {
+            return CheckAbort(txn) ||
+                   GrantLock(queue->request_queue.back().get(), queue);
+        })) {
         if (CheckAbort(txn)) {
             queue->request_queue.pop_back();
             return false;
@@ -7371,8 +7768,8 @@ bool LockManager::LockUpgrade(Transaction* txn, const RID& rid) {
     }
     auto timeout = std::chrono::milliseconds(100);
     if (queue->cv.wait_for(lock, timeout, [&]() {
-        return CheckAbort(txn) || GrantLock(it->get(), queue);
-    })) {
+            return CheckAbort(txn) || GrantLock(it->get(), queue);
+        })) {
         if (CheckAbort(txn)) {
             queue->upgrading = false;
             queue->cv.notify_all();
@@ -7398,16 +7795,14 @@ bool LockManager::Unlock(Transaction* txn, const RID& rid) {
         txn->SetState(TransactionState::SHRINKING);
     }
     bool found = false;
-    if (txn->GetSharedLockSet().count(rid) > 0) {
+    if (txn->GetSharedLockSet().count(rid)) {
         txn->RemoveSharedLock(rid);
         found = true;
-    } else if (txn->GetExclusiveLockSet().count(rid) > 0) {
+    } else if (txn->GetExclusiveLockSet().count(rid)) {
         txn->RemoveExclusiveLock(rid);
         found = true;
     }
-    if (!found) {
-        return false;
-    }
+    if (!found) return false;
     auto* queue = lock_table_[rid].get();
     auto it = queue->request_queue.begin();
     while (it != queue->request_queue.end()) {
@@ -7450,27 +7845,15 @@ void LockManager::UnlockAll(Transaction* txn) {
 }
 bool LockManager::GrantLock(LockRequest* request, LockRequestQueue* queue) {
     for (const auto& req : queue->request_queue) {
-        if (req->granted) {
-            if (req->txn_id == request->txn_id) {
-                continue;
-            }
-            if (request->lock_mode == LockMode::EXCLUSIVE) {
-                return false;
-            }
-            if (req->lock_mode == LockMode::EXCLUSIVE) {
-                return false;
-            }
-        }
-    }
-    if (queue->upgrading) {
-        if (request->lock_mode != LockMode::EXCLUSIVE) {
+        if (!req->granted) continue;
+        if (req->txn_id == request->txn_id) continue;
+        if (request->lock_mode == LockMode::EXCLUSIVE ||
+            req->lock_mode == LockMode::EXCLUSIVE) {
             return false;
         }
-        for (const auto& req : queue->request_queue) {
-            if (req->granted && req->txn_id != request->txn_id) {
-                return false;
-            }
-        }
+    }
+    if (queue->upgrading && request->lock_mode != LockMode::EXCLUSIVE) {
+        return false;
     }
     return true;
 }
@@ -7481,10 +7864,9 @@ void LockManager::GrantNewLocksInQueue(LockRequestQueue* queue) {
         }
     }
 }
-bool LockManager::CheckAbort(Transaction* txn) {
-    return txn->IsAborted();
+bool LockManager::CheckAbort(Transaction* txn) { return txn->IsAborted(); }
 }
-}
+
 
 ========== ./src/transaction/transaction.cpp ==========
 namespace SimpleRDBMS {
@@ -7501,6 +7883,7 @@ void Transaction::AddToWriteSet(const RID& rid, const Tuple& tuple) {
     }
 }
 }
+
 
 ========== ./src/transaction/transaction_manager.cpp ==========
 namespace SimpleRDBMS {
@@ -7548,8 +7931,6 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
     }
     LOG_DEBUG("TransactionManager::Begin: Transaction "
               << txn_id << " created successfully");
-    LOG_DEBUG("TransactionManager::Begin: Transaction state is GROWING, ptr is "
-              << txn_ptr);
     return txn_ptr;
 }
 bool TransactionManager::Commit(Transaction* txn) {
@@ -7606,11 +7987,12 @@ bool TransactionManager::Abort(Transaction* txn) {
 }
 }
 
+
 ========== ./src/buffer/buffer_pool_manager.h ==========
 namespace SimpleRDBMS {
 class BufferPoolManager {
-public:
-    BufferPoolManager(size_t pool_size, 
+   public:
+    BufferPoolManager(size_t pool_size,
                       std::unique_ptr<DiskManager> disk_manager,
                       std::unique_ptr<Replacer> replacer);
     ~BufferPoolManager();
@@ -7621,7 +8003,8 @@ public:
     bool FlushPage(page_id_t page_id);
     void FlushAllPages();
     DiskManager* GetDiskManager() { return disk_manager_.get(); }
-private:
+    Page* GetSpecificPage(page_id_t page_id);
+   private:
     size_t pool_size_;
     Page* pages_;
     std::unique_ptr<DiskManager> disk_manager_;
@@ -7634,17 +8017,18 @@ private:
 };
 }
 
+
 ========== ./src/buffer/lru_replacer.h ==========
 namespace SimpleRDBMS {
 class LRUReplacer : public Replacer {
-public:
+   public:
     explicit LRUReplacer(size_t num_pages);
     ~LRUReplacer() override;
     void Pin(size_t frame_id) override;
     void Unpin(size_t frame_id) override;
     bool Victim(size_t* frame_id) override;
     size_t Size() const override;
-private:
+   private:
     size_t num_pages_;
     std::list<size_t> lru_list_;
     std::unordered_map<size_t, std::list<size_t>::iterator> lru_map_;
@@ -7652,10 +8036,11 @@ private:
 };
 }
 
+
 ========== ./src/buffer/replacer.h ==========
 namespace SimpleRDBMS {
 class Replacer {
-public:
+   public:
     virtual ~Replacer() = default;
     virtual void Pin(size_t frame_id) = 0;
     virtual void Unpin(size_t frame_id) = 0;
@@ -7663,6 +8048,7 @@ public:
     virtual size_t Size() const = 0;
 };
 }
+
 
 ========== ./src/catalog/catalog.h ==========
 namespace SimpleRDBMS {
@@ -7684,7 +8070,8 @@ struct IndexInfo {
 };
 class Catalog {
    public:
-    explicit Catalog(BufferPoolManager* buffer_pool_manager, LogManager* log_manager = nullptr);
+    explicit Catalog(BufferPoolManager* buffer_pool_manager,
+                     LogManager* log_manager = nullptr);
     ~Catalog();
     bool CreateTable(const std::string& table_name, const Schema& schema);
     bool DropTable(const std::string& table_name);
@@ -7705,8 +8092,7 @@ class Catalog {
     void Shutdown() {
         try {
             SaveCatalogToDisk();
-            buffer_pool_manager_ =
-                nullptr;
+            buffer_pool_manager_ = nullptr;
         } catch (const std::exception& e) {
             LOG_WARN("Catalog::Shutdown: " << e.what());
         }
@@ -7714,11 +8100,13 @@ class Catalog {
    private:
     BufferPoolManager* buffer_pool_manager_;
     mutable std::mutex save_mutex_;
-    std::atomic<bool> save_in_progress_ = {false};
+    std::atomic<bool> save_in_progress_;
     LogManager* log_manager_;
-    std::unordered_map<std::string, std::unique_ptr<TableInfo>> tables_;
+    std::unordered_map<std::string, std::unique_ptr<TableInfo>>
+        tables_;
     std::unordered_map<oid_t, std::string> table_oid_map_;
-    std::unordered_map<std::string, std::unique_ptr<IndexInfo>> indexes_;
+    std::unordered_map<std::string, std::unique_ptr<IndexInfo>>
+        indexes_;
     std::unordered_map<oid_t, std::string> index_oid_map_;
     oid_t next_table_oid_;
     oid_t next_index_oid_;
@@ -7728,10 +8116,11 @@ class Catalog {
 };
 }
 
+
 ========== ./src/catalog/schema.h ==========
 namespace SimpleRDBMS {
 class Schema {
-public:
+   public:
     explicit Schema(const std::vector<Column>& columns);
     const Column& GetColumn(size_t index) const { return columns_[index]; }
     const Column& GetColumn(const std::string& name) const;
@@ -7740,11 +8129,12 @@ public:
     size_t GetColumnCount() const { return columns_.size(); }
     size_t GetTupleSize() const;
     bool HasColumn(const std::string& name) const;
-private:
+   private:
     std::vector<Column> columns_;
     std::unordered_map<std::string, size_t> column_indices_;
 };
 }
+
 
 ========== ./src/catalog/table_manager.h ==========
 namespace SimpleRDBMS {
@@ -7760,93 +8150,33 @@ class TableManager {
     ~TableManager();
     TableManager(const TableManager&) = delete;
     TableManager& operator=(const TableManager&) = delete;
-    /**
-     * 创建表
-     * @param stmt CREATE TABLE 语句
-     * @return 创建是否成功
-     */
     bool CreateTable(const CreateTableStatement* stmt);
-    /**
-     * 删除表
-     * @param table_name 表名
-     * @return 删除是否成功
-     */
     bool DropTable(const std::string& table_name);
-    /**
-     * 创建索引
-     * @param index_name 索引名称
-     * @param table_name 表名
-     * @param key_columns 索引列名列表
-     * @return 创建是否成功
-     */
     bool CreateIndex(const std::string& index_name,
                      const std::string& table_name,
                      const std::vector<std::string>& key_columns);
-    /**
-     * 删除索引
-     * @param index_name 索引名称
-     * @return 删除是否成功
-     */
     bool DropIndex(const std::string& index_name);
-    /**
-     * 在插入记录时更新相关索引
-     * @param table_name 表名
-     * @param tuple 插入的记录
-     * @param rid 记录标识符
-     * @return 更新是否成功
-     */
     bool UpdateIndexesOnInsert(const std::string& table_name,
                                const Tuple& tuple, const RID& rid);
-    /**
-     * 在删除记录时更新相关索引
-     * @param table_name 表名
-     * @param tuple 被删除的记录
-     * @return 更新是否成功
-     */
     bool UpdateIndexesOnDelete(const std::string& table_name,
                                const Tuple& tuple);
-    /**
-     * 在更新记录时更新相关索引
-     * @param table_name 表名
-     * @param old_tuple 更新前的记录
-     * @param new_tuple 更新后的记录
-     * @param rid 记录标识符
-     * @return 更新是否成功
-     */
     bool UpdateIndexesOnUpdate(const std::string& table_name,
                                const Tuple& old_tuple, const Tuple& new_tuple,
                                const RID& rid);
-    /**
-     * 获取目录对象
-     * @return 目录对象指针
-     */
     Catalog* GetCatalog() { return catalog_; }
-    /**
-     * 获取索引管理器
-     * @return 索引管理器指针
-     */
     IndexManager* GetIndexManager();
    private:
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
-    std::unique_ptr<IndexManager> index_manager_;
-    /**
-     * 使用现有数据填充索引
-     * @param index_name 索引名称
-     * @param table_info 表信息
-     * @param key_columns 索引列名列表
-     * @return 填充是否成功
-     */
+    std::unique_ptr<IndexManager>
+        index_manager_;
     bool PopulateIndexWithExistingData(
         const std::string& index_name, TableInfo* table_info,
         const std::vector<std::string>& key_columns);
-    /**
-     * 重建所有索引
-     * 在初始化时调用，确保所有表的索引都被正确创建
-     */
     void RebuildAllIndexes();
 };
 }
+
 
 ========== ./src/common/config.h ==========
 namespace SimpleRDBMS {
@@ -7863,6 +8193,7 @@ using lsn_t = int32_t;
 using oid_t = uint32_t;
 static constexpr page_id_t INVALID_PAGE_ID = -1;
 }
+
 
 ========== ./src/common/debug.h ==========
 namespace SimpleRDBMS {
@@ -7881,17 +8212,20 @@ inline DebugLevel GetDebugLevel() {
             int val = std::atoi(env);
             return static_cast<DebugLevel>(val);
         }
-        return DebugLevel::INFO;
+        return DebugLevel::WARN;
     }();
     return level;
 }
-    if (static_cast<int>(SimpleRDBMS::GetDebugLevel()) >= static_cast<int>(level)) { \
-        std::ostringstream oss; \
-        oss << msg; \
-        std::cerr << SimpleRDBMS::GetDebugPrefix(level) << " [" << __FILE__ << ":" << __LINE__ << " " << __FUNCTION__ << "] " \
-                  << oss.str() << DEBUG_COLOR_RESET << std::endl; \
-    } \
-} while(0)
+    do {                                                                      \
+        if (static_cast<int>(SimpleRDBMS::GetDebugLevel()) >=                 \
+            static_cast<int>(level)) {                                        \
+            std::ostringstream oss;                                           \
+            oss << msg;                                                       \
+            std::cerr << SimpleRDBMS::GetDebugPrefix(level) << " ["           \
+                      << __FILE__ << ":" << __LINE__ << " " << __FUNCTION__   \
+                      << "] " << oss.str() << DEBUG_COLOR_RESET << std::endl; \
+        }                                                                     \
+    } while (0)
 inline std::string GetDebugPrefix(DebugLevel level) {
     switch (level) {
         case DebugLevel::ERROR:
@@ -7909,7 +8243,7 @@ inline std::string GetDebugPrefix(DebugLevel level) {
     }
 }
 class Debug {
-public:
+   public:
     static std::string GetStackTrace(int skip = 1) {
         std::stringstream ss;
         const int max_frames = 128;
@@ -7921,7 +8255,8 @@ public:
                 Dl_info info;
                 if (dladdr(buffer[i], &info) && info.dli_sname) {
                     int status;
-                    char* demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+                    char* demangled = abi::__cxa_demangle(
+                        info.dli_sname, nullptr, nullptr, &status);
                     ss << "
                     if (info.dli_fname) {
                         std::string fname(info.dli_fname);
@@ -7940,14 +8275,16 @@ public:
                         ss << "???";
                     }
                     if (info.dli_saddr) {
-                        ss << " + " << std::hex << "0x" 
-                           << ((char*)buffer[i] - (char*)info.dli_saddr) << std::dec;
+                        ss << " + " << std::hex << "0x"
+                           << ((char*)buffer[i] - (char*)info.dli_saddr)
+                           << std::dec;
                     }
                     ss << "\n";
                 } else {
                     char** symbols = backtrace_symbols(&buffer[i], 1);
                     if (symbols) {
                         ss << "
+                           << symbols[0] << "\n";
                         free(symbols);
                     }
                 }
@@ -7961,61 +8298,70 @@ public:
 };
 }
 
+
 ========== ./src/common/exception.h ==========
 namespace SimpleRDBMS {
 class Exception : public std::exception {
-public:
-    explicit Exception(const std::string& message) : message_(message) {
-    }
-    Exception(const std::string& message, const std::string& file, int line, const std::string& func) {
+   public:
+    explicit Exception(const std::string& message) : message_(message) {}
+    Exception(const std::string& message, const std::string& file, int line,
+              const std::string& func) {
         std::ostringstream oss;
         oss << message << "\n  at " << file << ":" << line << " in " << func;
         message_ = oss.str();
         LOG_ERROR("Exception created: " << message_);
     }
-    const char* what() const noexcept override {
-        return message_.c_str();
-    }
-protected:
+    const char* what() const noexcept override { return message_.c_str(); }
+   protected:
     std::string message_;
 };
 class BufferPoolException : public Exception {
-public:
+   public:
     explicit BufferPoolException(const std::string& message)
         : Exception("BufferPool: " + message) {}
-    BufferPoolException(const std::string& message, const std::string& file, int line, const std::string& func)
+    BufferPoolException(const std::string& message, const std::string& file,
+                        int line, const std::string& func)
         : Exception("BufferPool: " + message, file, line, func) {}
 };
 class StorageException : public Exception {
-public:
+   public:
     explicit StorageException(const std::string& message)
         : Exception("Storage: " + message) {}
-    StorageException(const std::string& message, const std::string& file, int line, const std::string& func)
+    StorageException(const std::string& message, const std::string& file,
+                     int line, const std::string& func)
         : Exception("Storage: " + message, file, line, func) {}
 };
 class TransactionException : public Exception {
-public:
+   public:
     explicit TransactionException(const std::string& message)
         : Exception("Transaction: " + message) {}
-    TransactionException(const std::string& message, const std::string& file, int line, const std::string& func)
+    TransactionException(const std::string& message, const std::string& file,
+                         int line, const std::string& func)
         : Exception("Transaction: " + message, file, line, func) {}
 };
 class ExecutionException : public Exception {
-public:
+   public:
     explicit ExecutionException(const std::string& message)
         : Exception("Execution: " + message) {}
-    ExecutionException(const std::string& message, const std::string& file, int line, const std::string& func)
+    ExecutionException(const std::string& message, const std::string& file,
+                       int line, const std::string& func)
         : Exception("Execution: " + message, file, line, func) {}
 };
-    do { \
-        std::ostringstream oss; \
-        oss << msg; \
-        std::string message = oss.str(); \
+    do {                                                                       \
+        std::ostringstream oss;                                                \
+        oss << msg;                                                            \
+        std::string message = oss.str();                                       \
         LOG_ERROR("Throwing " <<
-        std::string stack_trace = SimpleRDBMS::Debug::GetStackTrace(); \
-        throw ExceptionClass(message + "\n" + stack_trace, __FILE__, __LINE__, __FUNCTION__); \
-    } while(0)
+        std::string stack_trace = SimpleRDBMS::Debug::GetStackTrace();         \
+        throw ExceptionClass(message + "\n" + stack_trace, __FILE__, __LINE__, \
+                             __FUNCTION__);                                    \
+    } while (0)
+    THROW_EXCEPTION_WITH_TRACE(StorageException, msg)
+    THROW_EXCEPTION_WITH_TRACE(BufferPoolException, msg)
+    THROW_EXCEPTION_WITH_TRACE(ExecutionException, msg)
+    THROW_EXCEPTION_WITH_TRACE(TransactionException, msg)
 }
+
 
 ========== ./src/common/types.h ==========
 namespace SimpleRDBMS {
@@ -8032,16 +8378,15 @@ enum class TypeId {
     VARCHAR,
     TIMESTAMP
 };
-using Value = std::variant<
-    bool,
-    int8_t,
-    int16_t,
-    int32_t,
-    int64_t,
-    float,
-    double,
-    std::string
->;
+using Value = std::variant<bool,
+                           int8_t,
+                           int16_t,
+                           int32_t,
+                           int64_t,
+                           float,
+                           double,
+                           std::string
+                           >;
 struct Column {
     std::string name;
     TypeId type;
@@ -8058,14 +8403,15 @@ struct RID {
 };
 }
 namespace std {
-    template <>
-    struct hash<SimpleRDBMS::RID> {
-        size_t operator()(const SimpleRDBMS::RID& rid) const {
-            return hash<SimpleRDBMS::page_id_t>()(rid.page_id) ^ 
-                   (hash<SimpleRDBMS::slot_offset_t>()(rid.slot_num) << 1);
-        }
-    };
+template <>
+struct hash<SimpleRDBMS::RID> {
+    size_t operator()(const SimpleRDBMS::RID& rid) const {
+        return hash<SimpleRDBMS::page_id_t>()(rid.page_id) ^
+               (hash<SimpleRDBMS::slot_offset_t>()(rid.slot_num) << 1);
+    }
+};
 }
+
 
 ========== ./src/execution/execution_engine.h ==========
 namespace SimpleRDBMS {
@@ -8076,7 +8422,8 @@ class DeletePlanNode;
 class ExecutionEngine {
    public:
     ExecutionEngine(BufferPoolManager* buffer_pool_manager, Catalog* catalog,
-                    TransactionManager* txn_manager, LogManager* log_manager = nullptr);
+                    TransactionManager* txn_manager,
+                    LogManager* log_manager = nullptr);
     bool Execute(Statement* statement, std::vector<Tuple>* result_set,
                  Transaction* txn);
    private:
@@ -8084,7 +8431,7 @@ class ExecutionEngine {
     Catalog* catalog_;
     TransactionManager* txn_manager_;
     LogManager* log_manager_;
-    std::unique_ptr<TableManager> table_manager_; 
+    std::unique_ptr<TableManager> table_manager_;
     std::string SelectBestIndex(const std::string& table_name,
                                 Expression* where_clause);
     std::unique_ptr<PlanNode> CreatePlan(Statement* statement);
@@ -8127,6 +8474,7 @@ class ExecutionEngine {
     }
 };
 }
+
 
 ========== ./src/execution/executor.h ==========
 namespace SimpleRDBMS {
@@ -8267,37 +8615,47 @@ class ProjectionExecutor : public Executor {
 };
 }
 
+
 ========== ./src/execution/expression_cloner.h ==========
 namespace SimpleRDBMS {
 class ExpressionCloner {
-public:
+   public:
     static std::unique_ptr<Expression> Clone(const Expression* expr);
-private:
-    static std::unique_ptr<Expression> CloneConstant(const ConstantExpression* expr);
-    static std::unique_ptr<Expression> CloneColumnRef(const ColumnRefExpression* expr);
-    static std::unique_ptr<Expression> CloneBinaryOp(const BinaryOpExpression* expr);
-    static std::unique_ptr<Expression> CloneUnaryOp(const UnaryOpExpression* expr);
+   private:
+    static std::unique_ptr<Expression> CloneConstant(
+        const ConstantExpression* expr);
+    static std::unique_ptr<Expression> CloneColumnRef(
+        const ColumnRefExpression* expr);
+    static std::unique_ptr<Expression> CloneBinaryOp(
+        const BinaryOpExpression* expr);
+    static std::unique_ptr<Expression> CloneUnaryOp(
+        const UnaryOpExpression* expr);
 };
 }
+
 
 ========== ./src/execution/expression_evaluator.h ==========
 namespace SimpleRDBMS {
 class ExpressionEvaluator {
-public:
+   public:
     ExpressionEvaluator(const Schema* schema) : schema_(schema) {}
     Value Evaluate(const Expression* expr, const Tuple& tuple);
     bool EvaluateAsBoolean(const Expression* expr, const Tuple& tuple);
-private:
+   private:
     const Schema* schema_;
     Value EvaluateConstant(const ConstantExpression* expr, const Tuple& tuple);
-    Value EvaluateColumnRef(const ColumnRefExpression* expr, const Tuple& tuple);
+    Value EvaluateColumnRef(const ColumnRefExpression* expr,
+                            const Tuple& tuple);
     Value EvaluateBinaryOp(const BinaryOpExpression* expr, const Tuple& tuple);
     Value EvaluateUnaryOp(const UnaryOpExpression* expr, const Tuple& tuple);
-    Value EvaluateArithmeticOp(const Value& left, const Value& right, BinaryOpExpression::OpType op);
-    bool CompareValues(const Value& left, const Value& right, BinaryOpExpression::OpType op);
+    Value EvaluateArithmeticOp(const Value& left, const Value& right,
+                               BinaryOpExpression::OpType op);
+    bool CompareValues(const Value& left, const Value& right,
+                       BinaryOpExpression::OpType op);
     bool IsValueTrue(const Value& value);
-    template<typename T>
-    bool CompareNumeric(const T& left, const T& right, BinaryOpExpression::OpType op);
+    template <typename T>
+    bool CompareNumeric(const T& left, const T& right,
+                        BinaryOpExpression::OpType op);
 };
 }
 
@@ -8390,14 +8748,17 @@ class ProjectionPlanNode : public PlanNode {
 class UpdatePlanNode : public PlanNode {
    public:
     UpdatePlanNode(
-        const Schema* output_schema, const std::string& table_name,
+        std::unique_ptr<Schema> output_schema, const std::string& table_name,
         std::vector<std::pair<std::string, std::unique_ptr<Expression>>>
             updates,
         std::unique_ptr<Expression> predicate = nullptr)
-        : PlanNode(output_schema, {}),
+        : PlanNode(nullptr, {}),
           table_name_(table_name),
           updates_(std::move(updates)),
-          predicate_(std::move(predicate)) {}
+          predicate_(std::move(predicate)),
+          owned_schema_(std::move(output_schema)) {
+        output_schema_ = owned_schema_.get();
+    }
     PlanNodeType GetType() const override { return PlanNodeType::UPDATE; }
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>&
@@ -8407,22 +8768,28 @@ class UpdatePlanNode : public PlanNode {
     Expression* GetPredicate() const { return predicate_.get(); }
    private:
     std::string table_name_;
-    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> updates_;
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>>
+        updates_;
     std::unique_ptr<Expression> predicate_;
+    std::unique_ptr<Schema> owned_schema_;
 };
 class DeletePlanNode : public PlanNode {
    public:
-    DeletePlanNode(const Schema* output_schema, const std::string& table_name,
+    DeletePlanNode(std::unique_ptr<Schema> output_schema, const std::string& table_name,
                    std::unique_ptr<Expression> predicate = nullptr)
-        : PlanNode(output_schema, {}),
+        : PlanNode(nullptr, {}),
           table_name_(table_name),
-          predicate_(std::move(predicate)) {}
+          predicate_(std::move(predicate)),
+          owned_schema_(std::move(output_schema)) {
+        output_schema_ = owned_schema_.get();
+    }
     PlanNodeType GetType() const override { return PlanNodeType::DELETE; }
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetPredicate() const { return predicate_.get(); }
    private:
     std::string table_name_;
     std::unique_ptr<Expression> predicate_;
+    std::unique_ptr<Schema> owned_schema_;
 };
 class IndexScanPlanNode : public PlanNode {
    public:
@@ -8445,25 +8812,27 @@ class IndexScanPlanNode : public PlanNode {
 };
 }
 
+
 ========== ./src/index/b_plus_tree.h ==========
 namespace SimpleRDBMS {
 template <typename KeyType>
 class BPlusTreeInternalPage;
 template <typename KeyType, typename ValueType>
 class BPlusTree {
-public:
+   public:
     BPlusTree(const std::string& name, BufferPoolManager* buffer_pool_manager);
     ~BPlusTree();
-    bool Insert(const KeyType& key, const ValueType& value, txn_id_t txn_id = -1);
+    bool Insert(const KeyType& key, const ValueType& value,
+                txn_id_t txn_id = -1);
     bool Remove(const KeyType& key, txn_id_t txn_id = -1);
     bool GetValue(const KeyType& key, ValueType* value, txn_id_t txn_id = -1);
     class Iterator {
-    public:
+       public:
         Iterator(BPlusTree* tree, page_id_t page_id, int index);
         bool IsEnd() const;
         void operator++();
         std::pair<KeyType, ValueType> operator*();
-    private:
+       private:
         BPlusTree* tree_;
         page_id_t current_page_id_;
         int current_index_;
@@ -8471,15 +8840,15 @@ public:
     Iterator Begin();
     Iterator Begin(const KeyType& key);
     Iterator End();
-private:
+   private:
     std::string index_name_;
     BufferPoolManager* buffer_pool_manager_;
     page_id_t root_page_id_;
     std::mutex latch_;
     Page* FindLeafPage(const KeyType& key, bool is_write_op);
-    bool InsertIntoLeaf(const KeyType& key, const ValueType& value, 
+    bool InsertIntoLeaf(const KeyType& key, const ValueType& value,
                         BPlusTreeLeafPage<KeyType, ValueType>* leaf);
-    void InsertIntoParent(BPlusTreePage* old_node, const KeyType& key, 
+    void InsertIntoParent(BPlusTreePage* old_node, const KeyType& key,
                           BPlusTreePage* new_node);
     template <typename N>
     bool Split(N* node);
@@ -8488,8 +8857,8 @@ private:
     bool AdjustRoot(BPlusTreePage* old_root_node);
     template <typename N>
     bool Coalesce(N** neighbor_node, N** node,
-                  BPlusTreeInternalPage<KeyType>** parent, 
-                  int index, txn_id_t txn_id);
+                  BPlusTreeInternalPage<KeyType>** parent, int index,
+                  txn_id_t txn_id);
     template <typename N>
     void Redistribute(N* neighbor_node, N* node, int index);
     void UpdateRootPageId(page_id_t root_page_id);
@@ -8497,6 +8866,7 @@ private:
     page_id_t GetHeaderPageId() const;
 };
 }
+
 
 ========== ./src/index/b_plus_tree_page.h ==========
 namespace SimpleRDBMS {
@@ -8507,7 +8877,7 @@ enum class IndexPageType {
     INTERNAL_PAGE
 };
 class BPlusTreePage {
-public:
+   public:
     bool IsLeafPage() const { return page_type_ == IndexPageType::LEAF_PAGE; }
     bool IsRootPage() const { return parent_page_id_ == INVALID_PAGE_ID; }
     void SetPageType(IndexPageType type) { page_type_ = type; }
@@ -8521,7 +8891,7 @@ public:
     void SetParentPageId(page_id_t parent_id) { parent_page_id_ = parent_id; }
     page_id_t GetPageId() const { return page_id_; }
     void SetPageId(page_id_t page_id) { page_id_ = page_id; }
-protected:
+   protected:
     IndexPageType page_type_;
     int size_;
     int max_size_;
@@ -8530,7 +8900,7 @@ protected:
 };
 template <typename KeyType, typename ValueType>
 class BPlusTreeLeafPage : public BPlusTreePage {
-public:
+   public:
     void Init(page_id_t page_id, page_id_t parent_id = INVALID_PAGE_ID);
     KeyType KeyAt(int index) const;
     ValueType ValueAt(int index) const;
@@ -8541,17 +8911,19 @@ public:
     bool Delete(const KeyType& key);
     void MoveHalfTo(BPlusTreeLeafPage* recipient);
     void MoveAllTo(BPlusTreeLeafPage* recipient);
-    void MoveFirstToEndOf(BPlusTreeLeafPage* recipient);
-    void MoveLastToFrontOf(BPlusTreeLeafPage* recipient);
+    void MoveFirstToEndOf(
+        BPlusTreeLeafPage* recipient);
+    void MoveLastToFrontOf(
+        BPlusTreeLeafPage* recipient);
     page_id_t GetNextPageId() const { return next_page_id_; }
     void SetNextPageId(page_id_t next_page_id) { next_page_id_ = next_page_id; }
-private:
+   private:
     page_id_t next_page_id_;
     char data_[0];
 };
 template <typename KeyType>
 class BPlusTreeInternalPage : public BPlusTreePage {
-public:
+   public:
     void Init(page_id_t page_id, page_id_t parent_id = INVALID_PAGE_ID);
     KeyType KeyAt(int index) const;
     void SetKeyAt(int index, const KeyType& key);
@@ -8559,16 +8931,24 @@ public:
     page_id_t ValueAt(int index) const;
     void SetValueAt(int index, page_id_t value);
     int ValueIndex(page_id_t value) const;
-    void InsertNodeAfter(page_id_t old_value, const KeyType& new_key, page_id_t new_value);
+    void InsertNodeAfter(page_id_t old_value, const KeyType& new_key,
+                         page_id_t new_value);
     void Remove(int index);
-    void MoveHalfTo(BPlusTreeInternalPage* recipient, BufferPoolManager* buffer_pool_manager);
-    void MoveAllTo(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager);
-    void MoveFirstToEndOf(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager);
-    void MoveLastToFrontOf(BPlusTreeInternalPage* recipient, const KeyType& middle_key, BufferPoolManager* buffer_pool_manager);
-private:
+    void MoveHalfTo(BPlusTreeInternalPage* recipient,
+                    BufferPoolManager* buffer_pool_manager);
+    void MoveAllTo(BPlusTreeInternalPage* recipient, const KeyType& middle_key,
+                   BufferPoolManager* buffer_pool_manager);
+    void MoveFirstToEndOf(BPlusTreeInternalPage* recipient,
+                          const KeyType& middle_key,
+                          BufferPoolManager* buffer_pool_manager);
+    void MoveLastToFrontOf(BPlusTreeInternalPage* recipient,
+                           const KeyType& middle_key,
+                           BufferPoolManager* buffer_pool_manager);
+   private:
     char data_[0];
 };
 }
+
 
 ========== ./src/index/index_manager.h ==========
 namespace SimpleRDBMS {
@@ -8578,75 +8958,31 @@ template <typename KeyType, typename ValueType>
 class BPlusTree;
 class IndexManagerImpl;
 class IndexManager {
-public:
-    explicit IndexManager(BufferPoolManager* buffer_pool_manager, Catalog* catalog = nullptr);
+   public:
+    explicit IndexManager(BufferPoolManager* buffer_pool_manager,
+                          Catalog* catalog = nullptr);
     ~IndexManager();
     IndexManager(const IndexManager&) = delete;
     IndexManager& operator=(const IndexManager&) = delete;
-    /**
-     * 创建索引
-     * @param index_name 索引名称
-     * @param table_name 表名
-     * @param key_columns 索引列名列表
-     * @param table_schema 表结构
-     * @return 创建是否成功
-     */
-    bool CreateIndex(const std::string& index_name, 
-                    const std::string& table_name,
-                    const std::vector<std::string>& key_columns,
-                    const Schema* table_schema);
-    /**
-     * 删除索引
-     * @param index_name 索引名称
-     * @return 删除是否成功
-     */
+    bool CreateIndex(const std::string& index_name,
+                     const std::string& table_name,
+                     const std::vector<std::string>& key_columns,
+                     const Schema* table_schema);
     bool DropIndex(const std::string& index_name);
-    /**
-     * 向索引中插入键值对
-     * @param index_name 索引名称
-     * @param key 键值
-     * @param rid 记录标识符
-     * @return 插入是否成功
-     */
-    bool InsertEntry(const std::string& index_name, const Value& key, const RID& rid);
-    /**
-     * 从索引中删除键值对
-     * @param index_name 索引名称
-     * @param key 键值
-     * @return 删除是否成功
-     */
+    bool InsertEntry(const std::string& index_name, const Value& key,
+                     const RID& rid);
     bool DeleteEntry(const std::string& index_name, const Value& key);
-    /**
-     * 在索引中查找键值
-     * @param index_name 索引名称
-     * @param key 键值
-     * @param rid 输出参数，存储找到的记录标识符
-     * @return 查找是否成功
-     */
     bool FindEntry(const std::string& index_name, const Value& key, RID* rid);
-    /**
-     * 获取指定类型的索引实例
-     * @tparam KeyType 键类型
-     * @param index_name 索引名称
-     * @return 索引实例指针，如果不存在则返回nullptr
-     */
     template <typename KeyType>
     BPlusTree<KeyType, RID>* GetIndex(const std::string& index_name);
-    /**
-     * 获取所有索引名称
-     * @return 索引名称列表
-     */
     std::vector<std::string> GetAllIndexNames() const;
-    /**
-     * 获取指定表的所有索引
-     * @param table_name 表名
-     * @return 索引名称列表
-     */
-    std::vector<std::string> GetTableIndexes(const std::string& table_name) const;
-private:
+    std::vector<std::string> GetTableIndexes(
+        const std::string& table_name) const;
+   private:
     std::unique_ptr<IndexManagerImpl> impl_;
 };
 }
+
 
 ========== ./src/parser/ast.h ==========
 namespace SimpleRDBMS {
@@ -8723,7 +9059,8 @@ class SelectStatement : public Statement {
     const std::string& GetTableName() const { return table_name_; }
     Expression* GetWhereClause() const { return where_clause_.get(); }
    private:
-    std::vector<std::unique_ptr<Expression>> select_list_;
+    std::vector<std::unique_ptr<Expression>>
+        select_list_;
     std::string table_name_;
     std::unique_ptr<Expression> where_clause_;
 };
@@ -8808,11 +9145,6 @@ class BinaryOpExpression : public Expression {
         MINUS,
         MULTIPLY,
         DIVIDE,
-        SHOW_TABLES,
-        BEGIN_TXN,
-        COMMIT_TXN,
-        ROLLBACK_TXN,
-        EXPLAIN,
     };
     BinaryOpExpression(std::unique_ptr<Expression> left, OpType op,
                        std::unique_ptr<Expression> right)
@@ -8868,7 +9200,10 @@ class DeleteStatement : public Statement {
 };
 class UnaryOpExpression : public Expression {
    public:
-    enum class OpType { NOT, NEGATIVE };
+    enum class OpType {
+        NOT,
+        NEGATIVE
+    };
     UnaryOpExpression(OpType op, std::unique_ptr<Expression> operand)
         : op_(op), operand_(std::move(operand)) {}
     ExprType GetType() const override { return ExprType::UNARY_OP; }
@@ -8935,6 +9270,7 @@ class ASTVisitor {
     virtual void Visit(ExplainStatement* stmt) = 0;
 };
 }
+
 
 ========== ./src/parser/lexer.h ==========
 namespace SimpleRDBMS {
@@ -9018,6 +9354,7 @@ class Lexer {
 };
 }
 
+
 ========== ./src/parser/parser.h ==========
 namespace SimpleRDBMS {
 class Parser {
@@ -9039,16 +9376,8 @@ class Parser {
     std::unique_ptr<Statement> ParseCreateTableStatement();
     std::unique_ptr<Statement> ParseDropTableStatement();
     std::unique_ptr<Statement> ParseInsertStatement();
-    std::unique_ptr<Expression> ParseExpression();
-    std::unique_ptr<Expression> ParsePrimaryExpression();
-    std::unique_ptr<Expression> ParseOrExpression();
-    std::unique_ptr<Expression> ParseAndExpression();
-    std::unique_ptr<Expression> ParseComparisonExpression();
-    std::unique_ptr<Expression> ParseArithmeticExpression();
-    std::unique_ptr<Expression> ParseTermExpression();
     std::unique_ptr<Statement> ParseUpdateStatement();
     std::unique_ptr<Statement> ParseDeleteStatement();
-    std::unique_ptr<Expression> ParseUnaryExpression();
     std::unique_ptr<Statement> ParseShowTablesStatement();
     std::unique_ptr<Statement> ParseBeginStatement();
     std::unique_ptr<Statement> ParseCommitStatement();
@@ -9056,10 +9385,19 @@ class Parser {
     std::unique_ptr<Statement> ParseExplainStatement();
     std::unique_ptr<Statement> ParseCreateIndexStatement();
     std::unique_ptr<Statement> ParseDropIndexStatement();
+    std::unique_ptr<Expression> ParseExpression();
+    std::unique_ptr<Expression> ParseOrExpression();
+    std::unique_ptr<Expression> ParseAndExpression();
+    std::unique_ptr<Expression> ParseComparisonExpression();
+    std::unique_ptr<Expression> ParseArithmeticExpression();
+    std::unique_ptr<Expression> ParseTermExpression();
+    std::unique_ptr<Expression> ParseUnaryExpression();
+    std::unique_ptr<Expression> ParsePrimaryExpression();
     std::vector<Column> ParseColumnDefinitions();
     TypeId ParseDataType();
 };
 }
+
 
 ========== ./src/record/table_heap.h ==========
 namespace SimpleRDBMS {
@@ -9079,9 +9417,8 @@ class TablePage : public Page {
         uint16_t num_tuples;
         uint16_t free_space_offset;
     };
-   private:
-    TablePageHeader* GetHeader();
     const TablePageHeader* GetHeader() const;
+    TablePageHeader* GetHeader();
 };
 class TableHeap {
    public:
@@ -9121,8 +9458,8 @@ class TableHeap {
 ========== ./src/record/tuple.h ==========
 namespace SimpleRDBMS {
 class Tuple {
-public:
-    Tuple() = default;
+   public:
+    Tuple() : serialized_size_(0) {}
     Tuple(std::vector<Value> values, const Schema* schema);
     Value GetValue(size_t index) const;
     const std::vector<Value>& GetValues() const { return values_; }
@@ -9131,17 +9468,18 @@ public:
     size_t GetSerializedSize() const;
     RID GetRID() const { return rid_; }
     void SetRID(const RID& rid) { rid_ = rid; }
-private:
+   private:
     std::vector<Value> values_;
     RID rid_;
     size_t serialized_size_;
 };
 }
 
+
 ========== ./src/recovery/log_manager.h ==========
 namespace SimpleRDBMS {
 class LogManager {
-public:
+   public:
     explicit LogManager(DiskManager* disk_manager);
     ~LogManager();
     lsn_t AppendLogRecord(LogRecord* log_record);
@@ -9150,7 +9488,7 @@ public:
     lsn_t GetPersistentLSN() const { return persistent_lsn_.load(); }
     std::vector<std::unique_ptr<LogRecord>> ReadLogRecords();
     void SetEnable(bool enable) { enable_logging_ = enable; }
-private:
+   private:
     DiskManager* disk_manager_;
     char* log_buffer_;
     size_t log_buffer_size_;
@@ -9167,6 +9505,7 @@ private:
 };
 }
 
+
 ========== ./src/recovery/log_record.h ==========
 namespace SimpleRDBMS {
 enum class LogRecordType {
@@ -9180,7 +9519,7 @@ enum class LogRecordType {
     CHECKPOINT
 };
 class LogRecord {
-public:
+   public:
     LogRecord(LogRecordType type, txn_id_t txn_id, lsn_t prev_lsn)
         : type_(type), txn_id_(txn_id), prev_lsn_(prev_lsn), size_(0) {}
     virtual ~LogRecord() = default;
@@ -9191,48 +9530,72 @@ public:
     txn_id_t GetTxnId() const { return txn_id_; }
     lsn_t GetPrevLSN() const { return prev_lsn_; }
     size_t GetSize() const { return size_; }
-protected:
+   protected:
     LogRecordType type_;
     txn_id_t txn_id_;
     lsn_t prev_lsn_;
     size_t size_;
 };
 class InsertLogRecord : public LogRecord {
-public:
-    InsertLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RID& rid, const Tuple& tuple)
+   public:
+    InsertLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RID& rid,
+                    const Tuple& tuple)
         : LogRecord(LogRecordType::INSERT, txn_id, prev_lsn),
-          rid_(rid), tuple_(tuple) {}
+          rid_(rid),
+          tuple_(tuple) {}
     void SerializeTo(char* buffer) const override;
     size_t GetLogRecordSize() const override {
-        return sizeof(page_id_t) + sizeof(slot_offset_t) + tuple_.GetSerializedSize();
+        return sizeof(page_id_t) + sizeof(slot_offset_t) +
+               tuple_.GetSerializedSize();
     }
     const RID& GetRID() const { return rid_; }
     const Tuple& GetTuple() const { return tuple_; }
-private:
+   private:
     RID rid_;
     Tuple tuple_;
 };
 class UpdateLogRecord : public LogRecord {
-public:
+   public:
     UpdateLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RID& rid,
                     const Tuple& old_tuple, const Tuple& new_tuple)
         : LogRecord(LogRecordType::UPDATE, txn_id, prev_lsn),
-          rid_(rid), old_tuple_(old_tuple), new_tuple_(new_tuple) {}
+          rid_(rid),
+          old_tuple_(old_tuple),
+          new_tuple_(new_tuple) {}
     void SerializeTo(char* buffer) const override;
     size_t GetLogRecordSize() const override {
-        return sizeof(page_id_t) + sizeof(slot_offset_t) + 
+        return sizeof(page_id_t) + sizeof(slot_offset_t) +
                old_tuple_.GetSerializedSize() + new_tuple_.GetSerializedSize();
     }
     const RID& GetRID() const { return rid_; }
     const Tuple& GetOldTuple() const { return old_tuple_; }
     const Tuple& GetNewTuple() const { return new_tuple_; }
-private:
+   private:
     RID rid_;
     Tuple old_tuple_;
     Tuple new_tuple_;
 };
+class DeleteLogRecord : public LogRecord {
+   public:
+    DeleteLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RID& rid,
+                    const Tuple& deleted_tuple)
+        : LogRecord(LogRecordType::DELETE, txn_id, prev_lsn),
+          rid_(rid),
+          deleted_tuple_(deleted_tuple) {}
+    ~DeleteLogRecord() override = default;
+    void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override {
+        return sizeof(page_id_t) + sizeof(slot_offset_t) +
+               deleted_tuple_.GetSerializedSize();
+    }
+    const RID& GetRID() const { return rid_; }
+    const Tuple& GetDeletedTuple() const { return deleted_tuple_; }
+   private:
+    RID rid_;
+    Tuple deleted_tuple_;
+};
 class BeginLogRecord : public LogRecord {
-public:
+   public:
     BeginLogRecord(txn_id_t txn_id)
         : LogRecord(LogRecordType::BEGIN, txn_id, INVALID_LSN) {}
     ~BeginLogRecord() override = default;
@@ -9240,7 +9603,7 @@ public:
     size_t GetLogRecordSize() const override { return 0; }
 };
 class CommitLogRecord : public LogRecord {
-public:
+   public:
     CommitLogRecord(txn_id_t txn_id, lsn_t prev_lsn)
         : LogRecord(LogRecordType::COMMIT, txn_id, prev_lsn) {}
     ~CommitLogRecord() override = default;
@@ -9248,7 +9611,7 @@ public:
     size_t GetLogRecordSize() const override { return 0; }
 };
 class AbortLogRecord : public LogRecord {
-public:
+   public:
     AbortLogRecord(txn_id_t txn_id, lsn_t prev_lsn)
         : LogRecord(LogRecordType::ABORT, txn_id, prev_lsn) {}
     ~AbortLogRecord() override = default;
@@ -9257,31 +9620,33 @@ public:
 };
 }
 
+
 ========== ./src/recovery/recovery_manager.h ==========
 namespace SimpleRDBMS {
 class RecoveryManager {
-public:
-    RecoveryManager(BufferPoolManager* buffer_pool_manager,
-                    Catalog* catalog,
-                    LogManager* log_manager,
-                    LockManager* lock_manager);
+   public:
+    RecoveryManager(BufferPoolManager* buffer_pool_manager, Catalog* catalog,
+                    LogManager* log_manager, LockManager* lock_manager);
     void Recover();
     void Checkpoint();
-private:
+   private:
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
     LogManager* log_manager_;
     LockManager* lock_manager_;
     std::unordered_map<txn_id_t, lsn_t> active_txn_table_;
     std::unordered_map<page_id_t, lsn_t> dirty_page_table_;
-    void AnalysisPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
+    void AnalysisPhase(
+        const std::vector<std::unique_ptr<LogRecord>>& log_records);
     void RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
     void UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
-    void UndoDelete(const UpdateLogRecord* log_record);
     void RedoInsert(const InsertLogRecord* log_record);
     void RedoUpdate(const UpdateLogRecord* log_record);
     void UndoInsert(const InsertLogRecord* log_record);
     void UndoUpdate(const UpdateLogRecord* log_record);
+    void UndoDelete(const UpdateLogRecord* log_record);
+    void RedoDelete(const DeleteLogRecord* log_record);
+    void UndoDelete(const DeleteLogRecord* log_record);
 };
 }
 
@@ -9289,7 +9654,7 @@ private:
 ========== ./src/storage/disk_manager.h ==========
 namespace SimpleRDBMS {
 class DiskManager {
-public:
+   public:
     explicit DiskManager(const std::string& db_file);
     ~DiskManager();
     void ReadPage(page_id_t page_id, char* page_data);
@@ -9297,7 +9662,7 @@ public:
     page_id_t AllocatePage();
     void DeallocatePage(page_id_t page_id);
     int GetNumPages() const { return num_pages_; }
-private:
+   private:
     std::string db_file_name_;
     std::fstream db_file_;
     int num_pages_;
@@ -9306,6 +9671,7 @@ private:
     std::vector<page_id_t> free_pages_;
 };
 }
+
 
 ========== ./src/storage/page.h ==========
 namespace SimpleRDBMS {
@@ -9343,12 +9709,9 @@ class Page {
 
 ========== ./src/transaction/lock_manager.h ==========
 namespace SimpleRDBMS {
-enum class LockMode {
-    SHARED = 0,
-    EXCLUSIVE
-};
+enum class LockMode { SHARED = 0, EXCLUSIVE };
 class LockManager {
-public:
+   public:
     LockManager() = default;
     ~LockManager() = default;
     bool LockShared(Transaction* txn, const RID& rid);
@@ -9356,7 +9719,7 @@ public:
     bool LockUpgrade(Transaction* txn, const RID& rid);
     bool Unlock(Transaction* txn, const RID& rid);
     void UnlockAll(Transaction* txn);
-private:
+   private:
     struct LockRequest {
         txn_id_t txn_id;
         LockMode lock_mode;
@@ -9375,6 +9738,7 @@ private:
 };
 }
 
+
 ========== ./src/transaction/transaction.h ==========
 namespace SimpleRDBMS {
 enum class TransactionState {
@@ -9391,8 +9755,9 @@ enum class IsolationLevel {
     SERIALIZABLE
 };
 class Transaction {
-public:
-    explicit Transaction(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::REPEATABLE_READ);
+   public:
+    explicit Transaction(txn_id_t txn_id, IsolationLevel isolation_level =
+                                              IsolationLevel::REPEATABLE_READ);
     ~Transaction();
     txn_id_t GetTxnId() const { return txn_id_; }
     TransactionState GetState() const { return state_; }
@@ -9404,12 +9769,18 @@ public:
     void AddExclusiveLock(const RID& rid) { exclusive_lock_set_.insert(rid); }
     void RemoveSharedLock(const RID& rid) { shared_lock_set_.erase(rid); }
     void RemoveExclusiveLock(const RID& rid) { exclusive_lock_set_.erase(rid); }
-    const std::unordered_set<RID>& GetSharedLockSet() const { return shared_lock_set_; }
-    const std::unordered_set<RID>& GetExclusiveLockSet() const { return exclusive_lock_set_; }
+    const std::unordered_set<RID>& GetSharedLockSet() const {
+        return shared_lock_set_;
+    }
+    const std::unordered_set<RID>& GetExclusiveLockSet() const {
+        return exclusive_lock_set_;
+    }
     void AddToWriteSet(const RID& rid, const Tuple& tuple);
-    const std::unordered_map<RID, Tuple>& GetWriteSet() const { return write_set_; }
+    const std::unordered_map<RID, Tuple>& GetWriteSet() const {
+        return write_set_;
+    }
     bool IsAborted() const { return state_ == TransactionState::ABORTED; }
-private:
+   private:
     txn_id_t txn_id_;
     TransactionState state_;
     IsolationLevel isolation_level_;
@@ -9420,18 +9791,20 @@ private:
 };
 }
 
+
 ========== ./src/transaction/transaction_manager.h ==========
 namespace SimpleRDBMS {
 class TransactionManager {
-public:
+   public:
     TransactionManager(LockManager* lock_manager, LogManager* log_manager);
     ~TransactionManager();
-    Transaction* Begin(IsolationLevel isolation_level = IsolationLevel::REPEATABLE_READ);
+    Transaction* Begin(
+        IsolationLevel isolation_level = IsolationLevel::REPEATABLE_READ);
     bool Commit(Transaction* txn);
     bool Abort(Transaction* txn);
     LockManager* GetLockManager() { return lock_manager_; }
     txn_id_t GetNextTxnId() { return next_txn_id_.fetch_add(1); }
-private:
+   private:
     std::atomic<txn_id_t> next_txn_id_{0};
     LockManager* lock_manager_;
     LogManager* log_manager_;
@@ -9439,4 +9812,5 @@ private:
     std::mutex txn_map_latch_;
 };
 }
+
 
