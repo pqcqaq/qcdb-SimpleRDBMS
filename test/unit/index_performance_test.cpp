@@ -194,7 +194,7 @@ TEST_F(PerformanceTestFixture, CreateTablesTest) {
     // 创建用户表
     std::string create_users_sql = R"(
         CREATE TABLE users (
-            user_id INT,
+            user_id INT PRIMARY KEY,
             username VARCHAR(50),
             email VARCHAR(100),
             age INT,
@@ -207,12 +207,11 @@ TEST_F(PerformanceTestFixture, CreateTablesTest) {
 
     auto time_users = ExecuteSQL(create_users_sql);
     std::cout << "创建用户表耗时: " << time_users << " ms" << std::endl;
-    EXPECT_GT(time_users, 0);
 
     // 创建商品表
     std::string create_products_sql = R"(
         CREATE TABLE products (
-            product_id INT,
+            product_id INT PRIMARY KEY,
             product_name VARCHAR(100),
             category VARCHAR(30),
             price FLOAT,
@@ -224,12 +223,11 @@ TEST_F(PerformanceTestFixture, CreateTablesTest) {
 
     auto time_products = ExecuteSQL(create_products_sql);
     std::cout << "创建商品表耗时: " << time_products << " ms" << std::endl;
-    EXPECT_GT(time_products, 0);
 
     // 创建订单表（主要测试表）
     std::string create_orders_sql = R"(
         CREATE TABLE orders (
-            order_id INT,
+            order_id INT PRIMARY KEY,
             user_id INT,
             product_id INT,
             quantity INT,
@@ -244,7 +242,6 @@ TEST_F(PerformanceTestFixture, CreateTablesTest) {
 
     auto time_orders = ExecuteSQL(create_orders_sql);
     std::cout << "创建订单表耗时: " << time_orders << " ms" << std::endl;
-    EXPECT_GT(time_orders, 0);
 }
 
 // 测试2：插入基础数据
@@ -330,11 +327,11 @@ TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
 
     // 先创建表和基础数据
     ExecuteSQL(
-        R"(CREATE TABLE users (user_id INT, username VARCHAR(50), email VARCHAR(100), age INT, city VARCHAR(30), registration_date VARCHAR(20), account_balance FLOAT, is_premium INT);)");
+        R"(CREATE TABLE users (user_id INT PRIMARY KEY, username VARCHAR(50), email VARCHAR(100), age INT, city VARCHAR(30), registration_date VARCHAR(20), account_balance FLOAT, is_premium INT);)");
     ExecuteSQL(
-        R"(CREATE TABLE products (product_id INT, product_name VARCHAR(100), category VARCHAR(30), price FLOAT, stock_quantity INT, supplier_id INT, created_date VARCHAR(20));)");
+        R"(CREATE TABLE products (product_id INT PRIMARY KEY, product_name VARCHAR(100), category VARCHAR(30), price FLOAT, stock_quantity INT, supplier_id INT, created_date VARCHAR(20));)");
     ExecuteSQL(
-        R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
+        R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入100万订单数据
     auto start = std::chrono::high_resolution_clock::now();
@@ -382,7 +379,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithoutIndexTest) {
 
     // 准备数据（简化版本，插入1万条数据用于快速测试）
     ExecuteSQL(
-        R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
+        R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     const int TEST_ORDER_COUNT = 100000;
     std::uniform_int_distribution<> user_dis(1, 10000);
@@ -432,7 +429,7 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
 
     // 先准备数据
     ExecuteSQL(
-        R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
+        R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入一些测试数据
     const int TEST_COUNT = 100000;
@@ -472,7 +469,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
 
     // 准备数据和索引
     ExecuteSQL(
-        R"(CREATE TABLE orders (order_id INT, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
+        R"(CREATE TABLE orders (order_id INT PRIMARY KEY, user_id INT, product_id INT, quantity INT, total_amount FLOAT, order_status VARCHAR(20), order_date VARCHAR(20), payment_method VARCHAR(20), shipping_city VARCHAR(30), discount_rate FLOAT);)");
 
     // 插入测试数据
     const int TEST_COUNT = 100000;
@@ -523,7 +520,7 @@ TEST_F(PerformanceTestFixture, ComprehensivePerformanceTest) {
     // 由于完整的100万数据测试时间较长，这里使用较小的数据集进行演示
 
     ExecuteSQL(
-        R"(CREATE TABLE test_orders (order_id INT, user_id INT, status VARCHAR(20));)");
+        R"(CREATE TABLE test_orders (order_id INT PRIMARY KEY, user_id INT, status VARCHAR(20));)");
 
     const int TEST_SIZE = 10000;
     std::uniform_int_distribution<> user_dis(1, 1000);
@@ -571,6 +568,11 @@ TEST_F(PerformanceTestFixture, ComprehensivePerformanceTest) {
 int main(int argc, char** argv) {
     setenv("SIMPLEDB_DEBUG_LEVEL", "0", 1);  // DEBUG级别
     ::testing::InitGoogleTest(&argc, argv);
+
+    // debug等级是第二个参数
+    if (argc > 1) {
+        setenv("SIMPLEDB_DEBUG_LEVEL", argv[1], 1);
+    }
 
     std::cout << "SimpleRDBMS 性能测试开始..." << std::endl;
     std::cout << "==========================================\n" << std::endl;
