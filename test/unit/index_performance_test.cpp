@@ -17,6 +17,7 @@
 #include "parser/parser.h"
 #include "recovery/log_manager.h"
 #include "recovery/recovery_manager.h"
+#include "stat/stat.h"
 #include "storage/disk_manager.h"
 #include "transaction/lock_manager.h"
 #include "transaction/transaction_manager.h"
@@ -52,6 +53,8 @@ class PerformanceTestFixture : public ::testing::Test {
         execution_engine_ = std::make_unique<ExecutionEngine>(
             buffer_pool_manager_.get(), catalog_.get(),
             transaction_manager_.get(), log_manager_.get());
+
+        STATS.Reset();
 
         recovery_manager_->Recover();
 
@@ -242,6 +245,7 @@ TEST_F(PerformanceTestFixture, CreateTablesTest) {
 
     auto time_orders = ExecuteSQL(create_orders_sql);
     std::cout << "创建订单表耗时: " << time_orders << " ms" << std::endl;
+    STATS.PrintStatistics();
 }
 
 // 测试2：插入基础数据
@@ -319,6 +323,7 @@ TEST_F(PerformanceTestFixture, InsertBaseDataTest) {
             .count();
     std::cout << "插入" << PRODUCT_COUNT << "商品耗时: " << product_insert_time
               << " ms" << std::endl;
+    STATS.PrintStatistics();
 }
 
 // 测试3：插入100万订单数据
@@ -371,6 +376,7 @@ TEST_F(PerformanceTestFixture, InsertMillionOrdersTest) {
               << std::endl;
     std::cout << "平均每条记录插入时间: " << (double)insert_time / ORDER_COUNT
               << " ms" << std::endl;
+    STATS.PrintStatistics();
 }
 
 // 测试4：查询性能测试（无索引）
@@ -421,6 +427,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithoutIndexTest) {
         std::cout << query_pair.first << " 耗时: " << query_time << " ms"
                   << std::endl;
     }
+    STATS.PrintStatistics();
 }
 
 // 测试5：创建索引
@@ -461,6 +468,7 @@ TEST_F(PerformanceTestFixture, CreateIndexTest) {
         std::cout << "创建" << index_pair.first << " 耗时: " << index_time
                   << " ms" << std::endl;
     }
+    STATS.PrintStatistics();
 }
 
 // 测试6：查询性能测试（有索引）
@@ -510,6 +518,7 @@ TEST_F(PerformanceTestFixture, QueryPerformanceWithIndexTest) {
         std::cout << query_pair.first << " 耗时: " << query_time << " ms"
                   << std::endl;
     }
+    STATS.PrintStatistics();
 }
 
 // 测试7：综合性能对比
@@ -562,6 +571,7 @@ TEST_F(PerformanceTestFixture, ComprehensivePerformanceTest) {
         std::cout << "性能提升: " << std::fixed << std::setprecision(1)
                   << improvement << "%" << std::endl;
     }
+    STATS.PrintStatistics();
 }
 
 // 主函数
@@ -577,5 +587,9 @@ int main(int argc, char** argv) {
     std::cout << "SimpleRDBMS 性能测试开始..." << std::endl;
     std::cout << "==========================================\n" << std::endl;
 
-    return RUN_ALL_TESTS();
+    auto res = RUN_ALL_TESTS();
+
+    std::cout << "\n==========================================\n"
+              << "SimpleRDBMS 性能测试结束." << std::endl;
+    return res;
 }

@@ -9,8 +9,11 @@
 
 #include "transaction/transaction_manager.h"
 
+#include <chrono>
+
 #include "common/debug.h"
 #include "recovery/log_record.h"
+#include "stat/stat.h"
 
 namespace SimpleRDBMS {
 
@@ -50,11 +53,15 @@ TransactionManager::~TransactionManager() {
 Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
     LOG_DEBUG("TransactionManager::Begin: Starting new transaction");
 
+    auto transaction_start_time = std::chrono::high_resolution_clock::now();
+
     txn_id_t txn_id = GetNextTxnId();
     LOG_DEBUG("TransactionManager::Begin: Assigned transaction ID " << txn_id);
 
     // 分配事务对象并设置隔离级别
     auto txn = std::make_unique<Transaction>(txn_id, isolation_level);
+
+    txn->SetStartTime(transaction_start_time);
 
     // 如果配置了日志管理器，写入 BEGIN 记录
     if (log_manager_ != nullptr) {
@@ -80,6 +87,8 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
         txn_map_[txn_id] = std::move(txn);
     }
 
+    STATS.RecordTransactionBegin();
+
     LOG_DEBUG("TransactionManager::Begin: Transaction "
               << txn_id << " created successfully");
     return txn_ptr;
@@ -98,6 +107,8 @@ bool TransactionManager::Commit(Transaction* txn) {
         return false;
     }
 
+    auto commit_start_time = std::chrono::high_resolution_clock::now();
+
     txn->SetState(TransactionState::COMMITTED);
 
     if (log_manager_ != nullptr) {
@@ -115,10 +126,18 @@ bool TransactionManager::Commit(Transaction* txn) {
         lock_manager_->UnlockAll(txn);  // 释放该事务的所有锁
     }
 
+    auto transaction_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            commit_start_time - txn->GetStartTime());
+    double duration_ms = transaction_duration.count() / 1000.0;
+
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+
+    STATS.RecordTransactionCommit();
+    STATS.RecordTransactionDuration(duration_ms);
 
     LOG_DEBUG("TransactionManager::Commit: Transaction "
               << txn->GetTxnId() << " committed successfully");
@@ -137,6 +156,8 @@ bool TransactionManager::Abort(Transaction* txn) {
     if (txn == nullptr) {
         return false;
     }
+
+    auto abort_start_time = std::chrono::high_resolution_clock::now();
 
     LOG_DEBUG("TransactionManager::Abort: Aborting transaction "
               << txn->GetTxnId());
@@ -158,10 +179,18 @@ bool TransactionManager::Abort(Transaction* txn) {
         lock_manager_->UnlockAll(txn);  // 释放所有锁
     }
 
+    auto transaction_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            abort_start_time - txn->GetStartTime());
+    double duration_ms = transaction_duration.count() / 1000.0;
+
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+
+    STATS.RecordTransactionAbort();
+    STATS.RecordTransactionDuration(duration_ms);
 
     LOG_DEBUG("TransactionManager::Abort: Transaction "
               << txn->GetTxnId() << " aborted successfully");

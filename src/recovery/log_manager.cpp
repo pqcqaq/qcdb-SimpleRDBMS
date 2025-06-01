@@ -14,6 +14,8 @@
 #include "recovery/log_record.h"
 #include "storage/disk_manager.h"
 
+#include "stat/stat.h"
+
 namespace SimpleRDBMS {
 
 /**
@@ -131,6 +133,8 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
     // 更新缓冲区偏移量
     log_buffer_offset_ += total_size_with_length;
 
+    STATS.RecordLogWrite(total_size_with_length);
+
     return lsn;
 }
 
@@ -161,6 +165,8 @@ void LogManager::Flush(lsn_t lsn) {
             // 如果没有指定LSN，就用当前最大的LSN减1
             persistent_lsn_.store(next_lsn_.load() - 1);
         }
+
+        STATS.RecordLogFlush();
 
         LOG_DEBUG(
             "Log flush completed, persistent LSN: " << persistent_lsn_.load());
@@ -240,6 +246,8 @@ void LogManager::TruncateLog(lsn_t checkpoint_lsn) {
     // 重置LSN跟踪
     last_checkpoint_lsn_ = checkpoint_lsn;
     log_page_ids_.clear();
+
+    STATS.RecordLogTruncation();
     
     LOG_INFO("TruncateLog: Log truncation completed");
 }

@@ -22,6 +22,7 @@
 #include "index/index_manager.h"  // 为了 IndexManager
 #include "parser/ast.h"           // 为了 CreateTableStatement
 #include "record/table_heap.h"    // 为了 TableHeap
+#include "stat/stat.h"            // 为了统计信息
 
 namespace SimpleRDBMS {
 
@@ -268,6 +269,8 @@ class IndexManagerImpl {
                      << index_name << " (now have " << indexes_.size()
                      << " indexes)");
 
+            STATS.RecordIndexCreation(index_name);
+
             // Debug: 列出当前所有索引
             LOG_DEBUG("IndexManager: Current indexes after creation:");
             for (const auto& [name, meta] : indexes_) {
@@ -299,6 +302,9 @@ class IndexManagerImpl {
 
         // 直接从map中删除，会自动调用析构函数清理B+树
         indexes_.erase(it);
+
+        STATS.RecordIndexDrop(index_name);
+
         LOG_INFO("IndexManager: Successfully dropped index "
                  << index_name << " (now have " << indexes_.size()
                  << " indexes)");
@@ -364,40 +370,62 @@ class IndexManagerImpl {
             return false;
         }
 
+        bool result = false;
+
         // 根据索引类型调用对应的B+树插入方法
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
-                    return tree->Insert(std::get<int32_t>(key), rid);
+                    result = tree->Insert(std::get<int32_t>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::INT64: {
                 auto* tree = GetIndex<int64_t>(index_name);
                 if (tree && std::holds_alternative<int64_t>(key)) {
-                    return tree->Insert(std::get<int64_t>(key), rid);
+                    result = tree->Insert(std::get<int64_t>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::FLOAT: {
                 auto* tree = GetIndex<float>(index_name);
                 if (tree && std::holds_alternative<float>(key)) {
-                    return tree->Insert(std::get<float>(key), rid);
+                    result = tree->Insert(std::get<float>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::DOUBLE: {
                 auto* tree = GetIndex<double>(index_name);
                 if (tree && std::holds_alternative<double>(key)) {
-                    return tree->Insert(std::get<double>(key), rid);
+                    result = tree->Insert(std::get<double>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::STRING: {
                 auto* tree = GetIndex<std::string>(index_name);
                 if (tree && std::holds_alternative<std::string>(key)) {
-                    return tree->Insert(std::get<std::string>(key), rid);
+                    result = tree->Insert(std::get<std::string>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
@@ -425,40 +453,62 @@ class IndexManagerImpl {
             return false;
         }
 
+        bool result = false;
+
         // 根据索引类型调用对应的B+树删除方法
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
-                    return tree->Remove(std::get<int32_t>(key));
+                    result = tree->Remove(std::get<int32_t>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::INT64: {
                 auto* tree = GetIndex<int64_t>(index_name);
                 if (tree && std::holds_alternative<int64_t>(key)) {
-                    return tree->Remove(std::get<int64_t>(key));
+                    result = tree->Remove(std::get<int64_t>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::FLOAT: {
                 auto* tree = GetIndex<float>(index_name);
                 if (tree && std::holds_alternative<float>(key)) {
-                    return tree->Remove(std::get<float>(key));
+                    result = tree->Remove(std::get<float>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::DOUBLE: {
                 auto* tree = GetIndex<double>(index_name);
                 if (tree && std::holds_alternative<double>(key)) {
-                    return tree->Remove(std::get<double>(key));
+                    result = tree->Remove(std::get<double>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::STRING: {
                 auto* tree = GetIndex<std::string>(index_name);
                 if (tree && std::holds_alternative<std::string>(key)) {
-                    return tree->Remove(std::get<std::string>(key));
+                    result = tree->Remove(std::get<std::string>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
@@ -498,6 +548,7 @@ class IndexManagerImpl {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
                     bool found = tree->GetValue(std::get<int32_t>(key), rid);
+                    STATS.RecordBTreeSearch(index_name);
                     LOG_DEBUG("IndexManager::FindEntry: INT32 search result = "
                               << found);
                     return found;

@@ -15,6 +15,7 @@
 #include "parser/parser.h"
 #include "recovery/log_manager.h"
 #include "recovery/recovery_manager.h"
+#include "stat/stat.h"
 #include "storage/disk_manager.h"
 #include "transaction/lock_manager.h"
 #include "transaction/transaction_manager.h"
@@ -51,6 +52,9 @@ class SimpleRDBMSServer {
             buffer_pool_manager_.get(), catalog_.get(),
             transaction_manager_.get(), log_manager_.get());
 
+        LOG_INFO("Initializing statistics system");
+        STATS.Reset();  // Start with clean statistics
+
         recovery_manager_->Recover();
     }
 
@@ -84,6 +88,21 @@ class SimpleRDBMSServer {
                 break;
             }
 
+            // Handle statistics command
+            if (accumulated_sql.empty() && line == "stats") {
+                ShowStatistics();
+                is_first_line = true;
+                continue;
+            }
+
+            // Handle reset statistics command
+            if (accumulated_sql.empty() && line == "reset stats") {
+                STATS.Reset();
+                std::cout << "Statistics have been reset." << std::endl;
+                is_first_line = true;
+                continue;
+            }
+
             // 如果是空行且没有累积的SQL，继续
             if (line.empty() && accumulated_sql.empty()) {
                 is_first_line = true;
@@ -115,6 +134,8 @@ class SimpleRDBMSServer {
                             end_time - start_time);
                     std::cout << "Query executed in " << duration.count()
                               << " ms" << std::endl;
+                    // Show mini statistics after each query
+                    ShowMiniStatistics();
                 }
 
                 // 移除已执行的部分
@@ -130,6 +151,7 @@ class SimpleRDBMSServer {
         }
 
         std::cout << "Shutting down..." << std::endl;
+        // ShowFinalStatistics();
         Shutdown();
     }
 
@@ -143,6 +165,105 @@ class SimpleRDBMSServer {
         }
         size_t end = str.find_last_not_of(whitespace);
         return str.substr(start, end - start + 1);
+    }
+
+    void ShowStatistics() {
+        std::cout << "\n";
+        STATS.PrintStatistics();
+        std::cout << std::endl;
+    }
+
+    void ShowMiniStatistics() {
+        double hit_ratio = STATS.GetBufferPoolHitRatio();
+        uint64_t disk_reads = STATS.GetTotalDiskReads();
+        uint64_t disk_writes = STATS.GetTotalDiskWrites();
+        uint64_t total_transactions = STATS.GetTotalTransactions();
+
+        std::cout << "[Stats: Cache Hit " << std::fixed << std::setprecision(1)
+                  << hit_ratio << "%, "
+                  << "Disk R/W " << disk_reads << "/" << disk_writes << ", "
+                  << "Txns " << total_transactions << "]" << std::endl;
+    }
+
+    void ShowFinalStatistics() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << std::setw(50) << std::right << "最终统计报告" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        STATS.PrintStatistics();
+
+        // 计算并显示汇总指标
+        double hit_ratio = STATS.GetBufferPoolHitRatio();
+        double success_rate = STATS.GetTransactionSuccessRate();
+        uint64_t total_disk_io =
+            STATS.GetTotalDiskReads() + STATS.GetTotalDiskWrites();
+
+        std::cout << "\n" << std::string(80, '-') << std::endl;
+        std::cout << std::setw(50) << std::right << "性能指标汇总" << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
+
+        // 格式化指标表格
+        std::cout << std::left << std::setw(35) << "指标名称" << std::right
+                  << std::setw(15) << "数值" << std::setw(30) << "评估"
+                  << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
+
+        // 缓存命中率
+        std::cout << std::left << std::setw(35)
+                  << "总体缓存命中率:" << std::right << std::setw(12)
+                  << std::fixed << std::setprecision(2) << hit_ratio << "%";
+        if (hit_ratio >= 80.0) {
+            std::cout << std::setw(30) << "[优秀]";
+        } else if (hit_ratio >= 60.0) {
+            std::cout << std::setw(30) << "[良好]";
+        } else {
+            std::cout << std::setw(30) << "[需要改进]";
+        }
+        std::cout << std::endl;
+
+        // 事务成功率
+        std::cout << std::left << std::setw(35) << "事务成功率:" << std::right
+                  << std::setw(12) << std::fixed << std::setprecision(2)
+                  << success_rate << "%";
+        if (success_rate >= 95.0) {
+            std::cout << std::setw(30) << "[优秀]";
+        } else if (success_rate >= 85.0) {
+            std::cout << std::setw(30) << "[良好]";
+        } else {
+            std::cout << std::setw(30) << "[需要关注]";
+        }
+        std::cout << std::endl;
+
+        // 总磁盘I/O操作
+        std::cout << std::left << std::setw(35)
+                  << "总磁盘I/O操作次数:" << std::right << std::setw(15)
+                  << total_disk_io << std::setw(30) << "" << std::endl;
+
+        std::cout << std::string(80, '-') << std::endl;
+
+        // 性能总结
+        std::cout << "\n性能总结:\n";
+        std::cout << std::string(40, '-') << std::endl;
+
+        std::cout << "缓存性能:        ";
+        if (hit_ratio >= 80.0) {
+            std::cout << "优秀 (>= 80%)" << std::endl;
+        } else if (hit_ratio >= 60.0) {
+            std::cout << "良好 (60-79%)" << std::endl;
+        } else {
+            std::cout << "需要改进 (< 60%)" << std::endl;
+        }
+
+        std::cout << "事务可靠性:      ";
+        if (success_rate >= 95.0) {
+            std::cout << "优秀 (>= 95%)" << std::endl;
+        } else if (success_rate >= 85.0) {
+            std::cout << "良好 (85-94%)" << std::endl;
+        } else {
+            std::cout << "需要关注 (< 85%)" << std::endl;
+        }
+
+        std::cout << std::string(80, '=') << std::endl;
     }
 
     void ExecuteSQL(const std::string& sql) {

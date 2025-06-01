@@ -14,6 +14,9 @@
 #include "execution/expression_cloner.h"
 #include "parser/ast.h"
 #include "recovery/log_manager.h"
+#include "stat/stat.h"
+
+#include <chrono>
 
 namespace SimpleRDBMS {
 
@@ -67,6 +70,9 @@ bool ExecutionEngine::Execute(Statement* statement,
         return false;
     }
 
+    std::string query_type;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     LOG_DEBUG("ExecutionEngine::Execute: Statement type: "
               << static_cast<int>(statement->GetType()));
 
@@ -74,50 +80,132 @@ bool ExecutionEngine::Execute(Statement* statement,
     switch (statement->GetType()) {
         case Statement::StmtType::CREATE_TABLE: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling CREATE_TABLE");
+            query_type = "CREATE_TABLE";
             auto* create_stmt = static_cast<CreateTableStatement*>(statement);
-            return table_manager_->CreateTable(create_stmt);
+            
+            bool success = table_manager_->CreateTable(create_stmt);
+
+            // Record execution time
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+
+            return success;
         }
         case Statement::StmtType::DROP_TABLE: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling DROP_TABLE");
+            query_type = "DROP_TABLE";
             auto* drop_stmt = static_cast<DropTableStatement*>(statement);
-            return table_manager_->DropTable(drop_stmt->GetTableName());
+            bool success = table_manager_->DropTable(drop_stmt->GetTableName());
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::CREATE_INDEX: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling CREATE_INDEX");
-            auto* create_idx_stmt =
-                static_cast<CreateIndexStatement*>(statement);
-            return table_manager_->CreateIndex(
+            query_type = "CREATE_INDEX";
+            auto* create_idx_stmt = static_cast<CreateIndexStatement*>(statement);
+            bool success = table_manager_->CreateIndex(
                 create_idx_stmt->GetIndexName(),
                 create_idx_stmt->GetTableName(),
                 create_idx_stmt->GetKeyColumns());
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::DROP_INDEX: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling DROP_INDEX");
+            query_type = "DROP_INDEX";
             auto* drop_idx_stmt = static_cast<DropIndexStatement*>(statement);
-            return table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
+            bool success = table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::SHOW_TABLES: {
-            // SHOW TABLES是特殊命令，直接处理
-            return HandleShowTables(result_set);
+            query_type = "SHOW_TABLES";
+            bool success = HandleShowTables(result_set);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, result_set->size());
+            
+            return success;
         }
         case Statement::StmtType::BEGIN_TXN: {
-            return HandleBegin(txn);
+            query_type = "BEGIN";
+            bool success = HandleBegin(txn);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::COMMIT_TXN: {
-            return HandleCommit(txn);
+            query_type = "COMMIT";
+            bool success = HandleCommit(txn);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::ROLLBACK_TXN: {
-            return HandleRollback(txn);
+            query_type = "ROLLBACK";
+            bool success = HandleRollback(txn);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            
+            return success;
         }
         case Statement::StmtType::EXPLAIN: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling EXPLAIN");
+            query_type = "EXPLAIN";
             auto* explain_stmt = static_cast<ExplainStatement*>(statement);
-            return HandleExplain(explain_stmt, result_set);
+            bool success = HandleExplain(explain_stmt, result_set);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, result_set->size());
+            
+            return success;
         }
         default:
-            LOG_DEBUG(
-                "ExecutionEngine::Execute: Handling DML statement, creating "
-                "plan");
+            LOG_DEBUG("ExecutionEngine::Execute: Handling DML statement, creating plan");
+            
+            // Determine query type for DML statements
+            switch (statement->GetType()) {
+                case Statement::StmtType::SELECT:
+                    query_type = "SELECT";
+                    break;
+                case Statement::StmtType::INSERT:
+                    query_type = "INSERT";
+                    break;
+                case Statement::StmtType::UPDATE:
+                    query_type = "UPDATE";
+                    break;
+                case Statement::StmtType::DELETE:
+                    query_type = "DELETE";
+                    break;
+                default:
+                    query_type = "UNKNOWN";
+                    break;
+            }
             break;
     }
 
@@ -156,20 +244,8 @@ bool ExecutionEngine::Execute(Statement* statement,
     const int MAX_TUPLES = 1000000;
 
     // 超时保护：设置10秒超时，防止长时间执行
-    auto start_time = std::chrono::steady_clock::now();
-    const auto TIMEOUT_DURATION = std::chrono::seconds(10);
 
     while (tuple_count < MAX_TUPLES) {
-        // 检查是否超时
-        auto current_time = std::chrono::steady_clock::now();
-        if (current_time - start_time > TIMEOUT_DURATION) {
-            LOG_ERROR("ExecutionEngine::Execute: Operation timed out after "
-                      << std::chrono::duration_cast<std::chrono::seconds>(
-                             TIMEOUT_DURATION)
-                             .count()
-                      << " seconds");
-            return false;
-        }
 
         bool has_next = false;
         try {
@@ -204,6 +280,10 @@ bool ExecutionEngine::Execute(Statement* statement,
                   << MAX_TUPLES << "), possible infinite loop detected");
         return false;
     }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, tuple_count);
 
     LOG_DEBUG("ExecutionEngine::Execute: Execution completed, processed "
               << tuple_count << " tuples");

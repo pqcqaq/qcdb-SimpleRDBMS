@@ -32,6 +32,7 @@ set(CORE_SOURCES
     src/recovery/log_manager.cpp
     src/recovery/log_record.cpp
     src/recovery/recovery_manager.cpp
+    src/stat/stat.cpp
 )
 
 set(SERVER_SOURCES

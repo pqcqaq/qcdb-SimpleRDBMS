@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -102,11 +103,23 @@ class Transaction {
     // 判断事务是否已中止
     bool IsAborted() const { return state_ == TransactionState::ABORTED; }
 
+    // 读写时间
+    std::chrono::high_resolution_clock::time_point GetStartTime() const {
+        return start_time_;
+    }
+
+    void SetStartTime(
+        const std::chrono::high_resolution_clock::time_point& start_time) {
+        start_time_ = start_time;
+    }
+
    private:
     txn_id_t txn_id_;                 // 当前事务的唯一标识符
     TransactionState state_;          // 当前事务状态
     IsolationLevel isolation_level_;  // 当前隔离级别
     lsn_t prev_lsn_;                  // 上一个WAL日志的LSN（用于恢复）
+    // 开始时间
+    std::chrono::high_resolution_clock::time_point start_time_;  // 事务开始时间
 
     // 锁集合，用于记录事务已经持有的锁
     std::unordered_set<RID> shared_lock_set_;     // 已获得的共享锁

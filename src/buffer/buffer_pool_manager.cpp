@@ -12,6 +12,7 @@
 
 #include "common/debug.h"
 #include "common/exception.h"
+#include "stat/stat.h"
 
 namespace SimpleRDBMS {
 
@@ -99,14 +100,19 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
         // 找到了！直接返回，记得增加引用计数
+        STATS.RecordBufferPoolHit();
         size_t frame_id = it->second;
         Page* page = &pages_[frame_id];
         page->IncreasePinCount();  // 增加pin计数，表示有人在用
+        STATS.RecordPagePin();
         replacer_->Pin(frame_id);  // 告诉替换器这个frame正在被使用
         LOG_TRACE("Page " << page_id << " found in buffer pool at frame "
                           << frame_id);
         return page;
     }
+
+    // Cache miss
+    STATS.RecordBufferPoolMiss();
 
     // 页面不在内存里，需要从磁盘加载
     size_t frame_id;
@@ -127,6 +133,7 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
             return nullptr;
         }
         page = &pages_[frame_id];
+        STATS.RecordPageEviction();
         LOG_TRACE("Evicting page " << page->GetPageId() << " from frame "
                                    << frame_id);
 
@@ -165,7 +172,9 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
 
         // 设置页面为被使用状态
         page->IncreasePinCount();
+        STATS.RecordPagePin();
         replacer_->Pin(frame_id);
+         STATS.UpdateBufferPoolSize(page_table_.size());
 
         return page;
     } catch (const StorageException& e) {
@@ -364,6 +373,8 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
 
     // 减少引用计数
     page->DecreasePinCount();
+    STATS.RecordPageUnpin();
+    
     if (is_dirty) {
         page->SetDirty(true);  // 标记为脏页，之后需要写回磁盘
     }

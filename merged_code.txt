@@ -40,14 +40,17 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
     }
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
+        STATS.RecordBufferPoolHit();
         size_t frame_id = it->second;
         Page* page = &pages_[frame_id];
         page->IncreasePinCount();
+        STATS.RecordPagePin();
         replacer_->Pin(frame_id);
         LOG_TRACE("Page " << page_id << " found in buffer pool at frame "
                           << frame_id);
         return page;
     }
+    STATS.RecordBufferPoolMiss();
     size_t frame_id;
     Page* page = nullptr;
     if (!free_list_.empty()) {
@@ -62,6 +65,7 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
             return nullptr;
         }
         page = &pages_[frame_id];
+        STATS.RecordPageEviction();
         LOG_TRACE("Evicting page " << page->GetPageId() << " from frame "
                                    << frame_id);
         if (page->IsDirty() && page->GetPageId() != INVALID_PAGE_ID) {
@@ -85,7 +89,9 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
         disk_manager_->ReadPage(page_id, page->GetData());
         page_table_[page_id] = frame_id;
         page->IncreasePinCount();
+        STATS.RecordPagePin();
         replacer_->Pin(frame_id);
+         STATS.UpdateBufferPoolSize(page_table_.size());
         return page;
     } catch (const StorageException& e) {
         LOG_DEBUG("Page " << page_id << " does not exist on disk: " << e.what()
@@ -198,6 +204,7 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
         return true;
     }
     page->DecreasePinCount();
+    STATS.RecordPageUnpin();
     if (is_dirty) {
         page->SetDirty(true);
     }
@@ -1626,54 +1633,117 @@ bool ExecutionEngine::Execute(Statement* statement,
         }
         return false;
     }
+    std::string query_type;
+    auto start_time = std::chrono::high_resolution_clock::now();
     LOG_DEBUG("ExecutionEngine::Execute: Statement type: "
               << static_cast<int>(statement->GetType()));
     switch (statement->GetType()) {
         case Statement::StmtType::CREATE_TABLE: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling CREATE_TABLE");
+            query_type = "CREATE_TABLE";
             auto* create_stmt = static_cast<CreateTableStatement*>(statement);
-            return table_manager_->CreateTable(create_stmt);
+            bool success = table_manager_->CreateTable(create_stmt);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::DROP_TABLE: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling DROP_TABLE");
+            query_type = "DROP_TABLE";
             auto* drop_stmt = static_cast<DropTableStatement*>(statement);
-            return table_manager_->DropTable(drop_stmt->GetTableName());
+            bool success = table_manager_->DropTable(drop_stmt->GetTableName());
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::CREATE_INDEX: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling CREATE_INDEX");
-            auto* create_idx_stmt =
-                static_cast<CreateIndexStatement*>(statement);
-            return table_manager_->CreateIndex(
+            query_type = "CREATE_INDEX";
+            auto* create_idx_stmt = static_cast<CreateIndexStatement*>(statement);
+            bool success = table_manager_->CreateIndex(
                 create_idx_stmt->GetIndexName(),
                 create_idx_stmt->GetTableName(),
                 create_idx_stmt->GetKeyColumns());
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::DROP_INDEX: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling DROP_INDEX");
+            query_type = "DROP_INDEX";
             auto* drop_idx_stmt = static_cast<DropIndexStatement*>(statement);
-            return table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
+            bool success = table_manager_->DropIndex(drop_idx_stmt->GetIndexName());
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::SHOW_TABLES: {
-            return HandleShowTables(result_set);
+            query_type = "SHOW_TABLES";
+            bool success = HandleShowTables(result_set);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, result_set->size());
+            return success;
         }
         case Statement::StmtType::BEGIN_TXN: {
-            return HandleBegin(txn);
+            query_type = "BEGIN";
+            bool success = HandleBegin(txn);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::COMMIT_TXN: {
-            return HandleCommit(txn);
+            query_type = "COMMIT";
+            bool success = HandleCommit(txn);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::ROLLBACK_TXN: {
-            return HandleRollback(txn);
+            query_type = "ROLLBACK";
+            bool success = HandleRollback(txn);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0);
+            return success;
         }
         case Statement::StmtType::EXPLAIN: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling EXPLAIN");
+            query_type = "EXPLAIN";
             auto* explain_stmt = static_cast<ExplainStatement*>(statement);
-            return HandleExplain(explain_stmt, result_set);
+            bool success = HandleExplain(explain_stmt, result_set);
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, result_set->size());
+            return success;
         }
         default:
-            LOG_DEBUG(
-                "ExecutionEngine::Execute: Handling DML statement, creating "
-                "plan");
+            LOG_DEBUG("ExecutionEngine::Execute: Handling DML statement, creating plan");
+            switch (statement->GetType()) {
+                case Statement::StmtType::SELECT:
+                    query_type = "SELECT";
+                    break;
+                case Statement::StmtType::INSERT:
+                    query_type = "INSERT";
+                    break;
+                case Statement::StmtType::UPDATE:
+                    query_type = "UPDATE";
+                    break;
+                case Statement::StmtType::DELETE:
+                    query_type = "DELETE";
+                    break;
+                default:
+                    query_type = "UNKNOWN";
+                    break;
+            }
             break;
     }
     LOG_DEBUG("ExecutionEngine::Execute: Creating execution plan");
@@ -1698,18 +1768,7 @@ bool ExecutionEngine::Execute(Statement* statement,
     RID rid;
     int tuple_count = 0;
     const int MAX_TUPLES = 1000000;
-    auto start_time = std::chrono::steady_clock::now();
-    const auto TIMEOUT_DURATION = std::chrono::seconds(10);
     while (tuple_count < MAX_TUPLES) {
-        auto current_time = std::chrono::steady_clock::now();
-        if (current_time - start_time > TIMEOUT_DURATION) {
-            LOG_ERROR("ExecutionEngine::Execute: Operation timed out after "
-                      << std::chrono::duration_cast<std::chrono::seconds>(
-                             TIMEOUT_DURATION)
-                             .count()
-                      << " seconds");
-            return false;
-        }
         bool has_next = false;
         try {
             has_next = executor->Next(&tuple, &rid);
@@ -1734,6 +1793,9 @@ bool ExecutionEngine::Execute(Statement* statement,
                   << MAX_TUPLES << "), possible infinite loop detected");
         return false;
     }
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    STATS.RecordQueryExecution(query_type, duration.count() / 1000.0, tuple_count);
     LOG_DEBUG("ExecutionEngine::Execute: Execution completed, processed "
               << tuple_count << " tuples");
     return true;
@@ -2952,7 +3014,6 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
             root_page->SetDirty(true);
             LOG_DEBUG("Unpinning root page...");
             buffer_pool_manager_->UnpinPage(new_page_id, true);
-            buffer_pool_manager_->FlushPage(new_page_id);
             LOG_DEBUG("Created root page and inserted key: "
                       << key << ", root_page_id: " << root_page_id_);
             return true;
@@ -2987,8 +3048,6 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
         root_page->SetDirty(true);
         LOG_DEBUG("Unpinning root page...");
         buffer_pool_manager_->UnpinPage(new_page_id, true);
-        buffer_pool_manager_->FlushPage(new_page_id);
-        buffer_pool_manager_->FlushPage(header_page_id);
         LOG_DEBUG("Created root page and inserted key: "
                   << key << ", root_page_id: " << root_page_id_);
         return true;
@@ -3294,7 +3353,6 @@ bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(
     new_page->SetDirty(true);
     InsertIntoParent(leaf, middle_key, new_leaf);
     buffer_pool_manager_->UnpinPage(new_page_id, true);
-    buffer_pool_manager_->FlushPage(new_page_id);
     return true;
 }
 template <typename KeyType, typename ValueType>
@@ -3328,7 +3386,6 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
         UpdateRootPageId(root_page_id_);
         new_root_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(new_root_id, true);
-        buffer_pool_manager_->FlushPage(new_root_id);
         LOG_DEBUG("Created new root page: " << new_root_id);
         return;
     }
@@ -3347,7 +3404,6 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
         new_node->SetParentPageId(parent->GetPageId());
         parent_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page_id, true);
-        buffer_pool_manager_->FlushPage(parent_page_id);
         LOG_DEBUG("Inserted into parent page successfully");
     } else {
         try {
@@ -3378,7 +3434,6 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
                     }
                     new_parent_page->SetDirty(true);
                     buffer_pool_manager_->UnpinPage(new_parent_page_id, true);
-                    buffer_pool_manager_->FlushPage(new_parent_page_id);
                 }
             }
         } catch (const std::exception& e) {
@@ -3386,7 +3441,6 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
         }
         parent_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page_id, true);
-        buffer_pool_manager_->FlushPage(parent_page_id);
     }
 }
 template <typename KeyType, typename ValueType>
@@ -3596,7 +3650,6 @@ void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
         root_page_id;
     header_page->SetDirty(true);
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
-    buffer_pool_manager_->FlushPage(header_page->GetPageId());
     LOG_DEBUG("Updated header page with root page ID: "
               << root_page_id << " for index: " << index_name_ << " at slot "
               << slot_index);
@@ -4329,6 +4382,7 @@ class IndexManagerImpl {
             LOG_INFO("IndexManager: Successfully created index "
                      << index_name << " (now have " << indexes_.size()
                      << " indexes)");
+            STATS.RecordIndexCreation(index_name);
             LOG_DEBUG("IndexManager: Current indexes after creation:");
             for (const auto& [name, meta] : indexes_) {
                 LOG_DEBUG("  - " << name << " on table " << meta->table_name);
@@ -4350,6 +4404,7 @@ class IndexManagerImpl {
             return false;
         }
         indexes_.erase(it);
+        STATS.RecordIndexDrop(index_name);
         LOG_INFO("IndexManager: Successfully dropped index "
                  << index_name << " (now have " << indexes_.size()
                  << " indexes)");
@@ -4386,39 +4441,60 @@ class IndexManagerImpl {
                                              << " not found for insertion");
             return false;
         }
+        bool result = false;
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
-                    return tree->Insert(std::get<int32_t>(key), rid);
+                    result = tree->Insert(std::get<int32_t>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::INT64: {
                 auto* tree = GetIndex<int64_t>(index_name);
                 if (tree && std::holds_alternative<int64_t>(key)) {
-                    return tree->Insert(std::get<int64_t>(key), rid);
+                    result = tree->Insert(std::get<int64_t>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::FLOAT: {
                 auto* tree = GetIndex<float>(index_name);
                 if (tree && std::holds_alternative<float>(key)) {
-                    return tree->Insert(std::get<float>(key), rid);
+                    result = tree->Insert(std::get<float>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::DOUBLE: {
                 auto* tree = GetIndex<double>(index_name);
                 if (tree && std::holds_alternative<double>(key)) {
-                    return tree->Insert(std::get<double>(key), rid);
+                    result = tree->Insert(std::get<double>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::STRING: {
                 auto* tree = GetIndex<std::string>(index_name);
                 if (tree && std::holds_alternative<std::string>(key)) {
-                    return tree->Insert(std::get<std::string>(key), rid);
+                    result = tree->Insert(std::get<std::string>(key), rid);
+                    if (result) {
+                        STATS.RecordBTreeInsertion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
@@ -4437,39 +4513,60 @@ class IndexManagerImpl {
                                              << " not found for deletion");
             return false;
         }
+        bool result = false;
         switch (metadata->key_type) {
             case IndexKeyType::INT32: {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
-                    return tree->Remove(std::get<int32_t>(key));
+                    result = tree->Remove(std::get<int32_t>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::INT64: {
                 auto* tree = GetIndex<int64_t>(index_name);
                 if (tree && std::holds_alternative<int64_t>(key)) {
-                    return tree->Remove(std::get<int64_t>(key));
+                    result = tree->Remove(std::get<int64_t>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::FLOAT: {
                 auto* tree = GetIndex<float>(index_name);
                 if (tree && std::holds_alternative<float>(key)) {
-                    return tree->Remove(std::get<float>(key));
+                    result = tree->Remove(std::get<float>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::DOUBLE: {
                 auto* tree = GetIndex<double>(index_name);
                 if (tree && std::holds_alternative<double>(key)) {
-                    return tree->Remove(std::get<double>(key));
+                    result = tree->Remove(std::get<double>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
             case IndexKeyType::STRING: {
                 auto* tree = GetIndex<std::string>(index_name);
                 if (tree && std::holds_alternative<std::string>(key)) {
-                    return tree->Remove(std::get<std::string>(key));
+                    result = tree->Remove(std::get<std::string>(key));
+                    if (result) {
+                        STATS.RecordBTreeDeletion(index_name);
+                    }
+                    return result;
                 }
                 break;
             }
@@ -4496,6 +4593,7 @@ class IndexManagerImpl {
                 auto* tree = GetIndex<int32_t>(index_name);
                 if (tree && std::holds_alternative<int32_t>(key)) {
                     bool found = tree->GetValue(std::get<int32_t>(key), rid);
+                    STATS.RecordBTreeSearch(index_name);
                     LOG_DEBUG("IndexManager::FindEntry: INT32 search result = "
                               << found);
                     return found;
@@ -4679,6 +4777,8 @@ class SimpleRDBMSServer {
         execution_engine_ = std::make_unique<ExecutionEngine>(
             buffer_pool_manager_.get(), catalog_.get(),
             transaction_manager_.get(), log_manager_.get());
+        LOG_INFO("Initializing statistics system");
+        STATS.Reset();
         recovery_manager_->Recover();
     }
     void Run() {
@@ -4702,6 +4802,17 @@ class SimpleRDBMSServer {
             if (accumulated_sql.empty() && (line == "exit" || line == "quit")) {
                 break;
             }
+            if (accumulated_sql.empty() && line == "stats") {
+                ShowStatistics();
+                is_first_line = true;
+                continue;
+            }
+            if (accumulated_sql.empty() && line == "reset stats") {
+                STATS.Reset();
+                std::cout << "Statistics have been reset." << std::endl;
+                is_first_line = true;
+                continue;
+            }
             if (line.empty() && accumulated_sql.empty()) {
                 is_first_line = true;
                 continue;
@@ -4724,6 +4835,7 @@ class SimpleRDBMSServer {
                             end_time - start_time);
                     std::cout << "Query executed in " << duration.count()
                               << " ms" << std::endl;
+                    ShowMiniStatistics();
                 }
                 accumulated_sql = accumulated_sql.substr(semicolon_pos + 1);
                 accumulated_sql = TrimWhitespace(accumulated_sql);
@@ -4743,6 +4855,83 @@ class SimpleRDBMSServer {
         }
         size_t end = str.find_last_not_of(whitespace);
         return str.substr(start, end - start + 1);
+    }
+    void ShowStatistics() {
+        std::cout << "\n";
+        STATS.PrintStatistics();
+        std::cout << std::endl;
+    }
+    void ShowMiniStatistics() {
+        double hit_ratio = STATS.GetBufferPoolHitRatio();
+        uint64_t disk_reads = STATS.GetTotalDiskReads();
+        uint64_t disk_writes = STATS.GetTotalDiskWrites();
+        uint64_t total_transactions = STATS.GetTotalTransactions();
+        std::cout << "[Stats: Cache Hit " << std::fixed << std::setprecision(1)
+                  << hit_ratio << "%, "
+                  << "Disk R/W " << disk_reads << "/" << disk_writes << ", "
+                  << "Txns " << total_transactions << "]" << std::endl;
+    }
+    void ShowFinalStatistics() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << std::setw(50) << std::right << "最终统计报告" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+        STATS.PrintStatistics();
+        double hit_ratio = STATS.GetBufferPoolHitRatio();
+        double success_rate = STATS.GetTransactionSuccessRate();
+        uint64_t total_disk_io =
+            STATS.GetTotalDiskReads() + STATS.GetTotalDiskWrites();
+        std::cout << "\n" << std::string(80, '-') << std::endl;
+        std::cout << std::setw(50) << std::right << "性能指标汇总" << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
+        std::cout << std::left << std::setw(35) << "指标名称" << std::right
+                  << std::setw(15) << "数值" << std::setw(30) << "评估"
+                  << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
+        std::cout << std::left << std::setw(35)
+                  << "总体缓存命中率:" << std::right << std::setw(12)
+                  << std::fixed << std::setprecision(2) << hit_ratio << "%";
+        if (hit_ratio >= 80.0) {
+            std::cout << std::setw(30) << "[优秀]";
+        } else if (hit_ratio >= 60.0) {
+            std::cout << std::setw(30) << "[良好]";
+        } else {
+            std::cout << std::setw(30) << "[需要改进]";
+        }
+        std::cout << std::endl;
+        std::cout << std::left << std::setw(35) << "事务成功率:" << std::right
+                  << std::setw(12) << std::fixed << std::setprecision(2)
+                  << success_rate << "%";
+        if (success_rate >= 95.0) {
+            std::cout << std::setw(30) << "[优秀]";
+        } else if (success_rate >= 85.0) {
+            std::cout << std::setw(30) << "[良好]";
+        } else {
+            std::cout << std::setw(30) << "[需要关注]";
+        }
+        std::cout << std::endl;
+        std::cout << std::left << std::setw(35)
+                  << "总磁盘I/O操作次数:" << std::right << std::setw(15)
+                  << total_disk_io << std::setw(30) << "" << std::endl;
+        std::cout << std::string(80, '-') << std::endl;
+        std::cout << "\n性能总结:\n";
+        std::cout << std::string(40, '-') << std::endl;
+        std::cout << "缓存性能:        ";
+        if (hit_ratio >= 80.0) {
+            std::cout << "优秀 (>= 80%)" << std::endl;
+        } else if (hit_ratio >= 60.0) {
+            std::cout << "良好 (60-79%)" << std::endl;
+        } else {
+            std::cout << "需要改进 (< 60%)" << std::endl;
+        }
+        std::cout << "事务可靠性:      ";
+        if (success_rate >= 95.0) {
+            std::cout << "优秀 (>= 95%)" << std::endl;
+        } else if (success_rate >= 85.0) {
+            std::cout << "良好 (85-94%)" << std::endl;
+        } else {
+            std::cout << "需要关注 (< 85%)" << std::endl;
+        }
+        std::cout << std::string(80, '=') << std::endl;
     }
     void ExecuteSQL(const std::string& sql) {
         try {
@@ -5090,7 +5279,7 @@ class SimpleRDBMSServer {
         return result;
     }
     void Shutdown() {
-        recovery_manager_->Checkpoint();
+        recovery_manager_->CheckpointWithLogTruncation();
     }
     std::unique_ptr<DiskManager> disk_manager_;
     std::unique_ptr<DiskManager> log_disk_manager_;
@@ -6954,7 +7143,8 @@ LogManager::LogManager(DiskManager* disk_manager)
     : disk_manager_(disk_manager),
       log_buffer_size_(PAGE_SIZE),
       log_buffer_offset_(0),
-      current_log_page_id_(0) {
+      current_log_page_id_(0),
+      last_checkpoint_lsn_(INVALID_LSN) {
     if (disk_manager_ == nullptr) {
         throw std::invalid_argument("DiskManager cannot be null");
     }
@@ -7011,6 +7201,7 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
         log_record->SerializeTo(buffer_ptr);
     }
     log_buffer_offset_ += total_size_with_length;
+    STATS.RecordLogWrite(total_size_with_length);
     return lsn;
 }
 void LogManager::Flush(lsn_t lsn) {
@@ -7028,6 +7219,7 @@ void LogManager::Flush(lsn_t lsn) {
         } else {
             persistent_lsn_.store(next_lsn_.load() - 1);
         }
+        STATS.RecordLogFlush();
         LOG_DEBUG(
             "Log flush completed, persistent LSN: " << persistent_lsn_.load());
     } catch (const std::exception& e) {
@@ -7045,6 +7237,7 @@ void LogManager::FlushLogBuffer() {
         memset(page_buffer, 0, PAGE_SIZE);
         memcpy(page_buffer, log_buffer_, log_buffer_offset_);
         disk_manager_->WritePage(log_page_id, page_buffer);
+        log_page_ids_.push_back(log_page_id);
         LOG_DEBUG("Log buffer flushed to page "
                   << log_page_id << ", bytes written: " << log_buffer_offset_);
         log_buffer_offset_ = 0;
@@ -7054,6 +7247,46 @@ void LogManager::FlushLogBuffer() {
         LOG_ERROR("Failed to flush log buffer: " << e.what());
         throw;
     }
+}
+void LogManager::TruncateLog(lsn_t checkpoint_lsn) {
+    std::unique_lock<std::mutex> lock(latch_);
+    if (checkpoint_lsn <= last_checkpoint_lsn_) {
+        LOG_DEBUG("TruncateLog: checkpoint_lsn " << checkpoint_lsn
+                  << " <= last_checkpoint_lsn " << last_checkpoint_lsn_
+                  << ", skipping truncation");
+        return;
+    }
+    LOG_INFO("TruncateLog: Truncating log up to LSN " << checkpoint_lsn);
+    if (log_buffer_offset_ > 0) {
+        FlushLogBuffer();
+    }
+    ClearLogFile();
+    last_checkpoint_lsn_ = checkpoint_lsn;
+    log_page_ids_.clear();
+    STATS.RecordLogTruncation();
+    LOG_INFO("TruncateLog: Log truncation completed");
+}
+void LogManager::ClearLogFile() {
+    LOG_INFO("ClearLogFile: Clearing log file");
+    for (page_id_t page_id : log_page_ids_) {
+        try {
+            disk_manager_->DeallocatePage(page_id);
+            LOG_DEBUG("ClearLogFile: Deallocated log page " << page_id);
+        } catch (const std::exception& e) {
+            LOG_WARN("ClearLogFile: Failed to deallocate page " << page_id
+                     << ": " << e.what());
+        }
+    }
+    log_buffer_offset_ = 0;
+    memset(log_buffer_, 0, log_buffer_size_);
+    log_page_ids_.clear();
+    current_log_page_id_ = 0;
+    LOG_INFO("ClearLogFile: Log file cleared, " << log_page_ids_.size()
+             << " pages deallocated");
+}
+size_t LogManager::GetLogFileSize() {
+    std::unique_lock<std::mutex> lock(latch_);
+    return log_page_ids_.size() * PAGE_SIZE + log_buffer_offset_;
 }
 void LogManager::BackgroundFlush() {
 }
@@ -7251,7 +7484,30 @@ RecoveryManager::RecoveryManager(BufferPoolManager* buffer_pool_manager,
     : buffer_pool_manager_(buffer_pool_manager),
       catalog_(catalog),
       log_manager_(log_manager),
-      lock_manager_(lock_manager) {}
+      lock_manager_(lock_manager),
+      last_checkpoint_lsn_(INVALID_LSN) {}
+void RecoveryManager::CheckpointWithLogTruncation() {
+    LOG_INFO("Starting checkpoint with log truncation");
+    buffer_pool_manager_->FlushAllPages();
+    log_manager_->Flush();
+    lsn_t checkpoint_lsn = log_manager_->GetPersistentLSN();
+    try {
+        catalog_->SaveCatalogToDisk();
+        LOG_DEBUG("Catalog saved during checkpoint");
+    } catch (const std::exception& e) {
+        LOG_WARN("Failed to save catalog during checkpoint: " << e.what());
+    }
+    if (checkpoint_lsn > last_checkpoint_lsn_) {
+        log_manager_->TruncateLog(checkpoint_lsn);
+        last_checkpoint_lsn_ = checkpoint_lsn;
+        LOG_INFO("Log truncated up to LSN " << checkpoint_lsn);
+        LOG_INFO("Log file size after truncation: "
+                 << log_manager_->GetLogFileSize() << " bytes");
+    } else {
+        LOG_DEBUG("Skipping log truncation, no new persistent LSN");
+    }
+    LOG_INFO("Checkpoint with log truncation completed");
+}
 void RecoveryManager::Recover() {
     LOG_INFO("Starting recovery process");
     auto log_records = log_manager_->ReadLogRecords();
@@ -7496,6 +7752,474 @@ void RecoveryManager::UndoDelete(const DeleteLogRecord* log_record) {
 }
 
 
+========== ./src/stat/stat.cpp ==========
+namespace SimpleRDBMS {
+void Statistics::RecordBTreeSplit(const std::string& index_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->splits.fetch_add(1);
+    LOG_DEBUG("Statistics: Recorded B+Tree split for index " << index_name);
+}
+void Statistics::RecordBTreeMerge(const std::string& index_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->merges.fetch_add(1);
+    LOG_DEBUG("Statistics: Recorded B+Tree merge for index " << index_name);
+}
+void Statistics::RecordBTreeInsertion(const std::string& index_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->insertions.fetch_add(1);
+}
+void Statistics::RecordBTreeDeletion(const std::string& index_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->deletions.fetch_add(1);
+}
+void Statistics::RecordBTreeSearch(const std::string& index_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->searches.fetch_add(1);
+}
+void Statistics::UpdateBTreeNodeCount(const std::string& index_name,
+                                      int node_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->node_count.store(node_count);
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count();
+    btree_stats_[index_name]->last_updated.store(now);
+}
+void Statistics::UpdateBTreeHeight(const std::string& index_name, int height) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->height.store(height);
+}
+void Statistics::UpdateBTreeFillFactor(const std::string& index_name,
+                                       double fill_factor) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.find(index_name) == btree_stats_.end()) {
+        btree_stats_[index_name] = std::make_unique<BTreeStats>();
+    }
+    btree_stats_[index_name]->fill_factor.store(fill_factor);
+}
+void Statistics::RecordBufferPoolHit() { buffer_pool_hits_.fetch_add(1); }
+void Statistics::RecordBufferPoolMiss() { buffer_pool_misses_.fetch_add(1); }
+void Statistics::UpdateBufferPoolSize(int size) {
+    buffer_pool_size_.store(size);
+}
+void Statistics::RecordPageEviction() { page_evictions_.fetch_add(1); }
+void Statistics::RecordPagePin() { page_pins_.fetch_add(1); }
+void Statistics::RecordPageUnpin() { page_unpins_.fetch_add(1); }
+void Statistics::RecordDiskRead(size_t bytes) {
+    disk_reads_.fetch_add(1);
+    disk_read_bytes_.fetch_add(bytes);
+}
+void Statistics::RecordDiskWrite(size_t bytes) {
+    disk_writes_.fetch_add(1);
+    disk_write_bytes_.fetch_add(bytes);
+}
+void Statistics::RecordPageAllocation() { page_allocations_.fetch_add(1); }
+void Statistics::RecordPageDeallocation() { page_deallocations_.fetch_add(1); }
+void Statistics::RecordTransactionBegin() { transaction_begins_.fetch_add(1); }
+void Statistics::RecordTransactionCommit() {
+    transaction_commits_.fetch_add(1);
+}
+void Statistics::RecordTransactionAbort() { transaction_aborts_.fetch_add(1); }
+void Statistics::RecordTransactionDuration(double duration_ms) {
+    double current_total = total_transaction_time_ms_.load();
+    while (!total_transaction_time_ms_.compare_exchange_weak(
+        current_total, current_total + duration_ms)) {
+    }
+}
+void Statistics::RecordQueryExecution(const std::string& query_type,
+                                      double execution_time_ms,
+                                      uint64_t tuples_processed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    QueryStats& stats = query_stats_[query_type];
+    stats.count++;
+    stats.total_time_ms += execution_time_ms;
+    stats.min_time_ms = std::min(stats.min_time_ms, execution_time_ms);
+    stats.max_time_ms = std::max(stats.max_time_ms, execution_time_ms);
+    stats.total_tuples_processed += tuples_processed;
+    LOG_DEBUG("Statistics: Recorded "
+              << query_type << " query execution: " << execution_time_ms
+              << "ms, " << tuples_processed << " tuples");
+}
+void Statistics::RecordLockAcquisition(const std::string& lock_type) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lock_acquisitions_[lock_type]++;
+}
+void Statistics::RecordLockWait(double wait_time_ms) {
+    lock_waits_.fetch_add(1);
+    double current_total = total_lock_wait_time_ms_.load();
+    while (!total_lock_wait_time_ms_.compare_exchange_weak(
+        current_total, current_total + wait_time_ms)) {
+    }
+}
+void Statistics::RecordLockConflict() { lock_conflicts_.fetch_add(1); }
+void Statistics::RecordDeadlock() { deadlocks_.fetch_add(1); }
+void Statistics::RecordLogWrite(size_t bytes) {
+    log_writes_.fetch_add(1);
+    log_write_bytes_.fetch_add(bytes);
+}
+void Statistics::RecordLogFlush() { log_flushes_.fetch_add(1); }
+void Statistics::RecordLogTruncation() { log_truncations_.fetch_add(1); }
+void Statistics::RecordIndexCreation(const std::string& index_name) {
+    index_creations_.fetch_add(1);
+    LOG_INFO("Statistics: Recorded index creation: " << index_name);
+}
+void Statistics::RecordIndexDrop(const std::string& index_name) {
+    index_drops_.fetch_add(1);
+    LOG_INFO("Statistics: Recorded index drop: " << index_name);
+}
+void Statistics::RecordIndexRebuild(const std::string& index_name) {
+    index_rebuilds_.fetch_add(1);
+    LOG_INFO("Statistics: Recorded index rebuild: " << index_name);
+}
+double Statistics::GetBufferPoolHitRatio() const {
+    uint64_t hits = buffer_pool_hits_.load();
+    uint64_t misses = buffer_pool_misses_.load();
+    uint64_t total = hits + misses;
+    return total > 0 ? (static_cast<double>(hits) / total) * 100.0 : 0.0;
+}
+BTreeStats Statistics::GetBTreeStats(const std::string& index_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = btree_stats_.find(index_name);
+    if (it != btree_stats_.end()) {
+        return *(it->second);
+    }
+    return BTreeStats();
+}
+QueryStats Statistics::GetQueryStats(const std::string& query_type) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = query_stats_.find(query_type);
+    if (it != query_stats_.end()) {
+        return it->second;
+    }
+    return QueryStats();
+}
+double Statistics::GetTransactionSuccessRate() const {
+    uint64_t commits = transaction_commits_.load();
+    uint64_t aborts = transaction_aborts_.load();
+    uint64_t total = commits + aborts;
+    return total > 0 ? (static_cast<double>(commits) / total) * 100.0 : 0.0;
+}
+void Statistics::PrintStatistics() const {
+    PrintBufferPoolStatistics();
+    PrintDiskStatistics();
+    PrintTransactionStatistics();
+    PrintQueryStatistics();
+    PrintBTreeStatistics();
+    PrintLockStatistics();
+    PrintLogStatistics();
+}
+void Statistics::PrintBTreeStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " B+树索引统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (btree_stats_.empty()) {
+        std::cout << "  暂无B+树统计数据" << std::endl;
+        return;
+    }
+    for (const auto& [index_name, stats] : btree_stats_) {
+        std::cout << std::endl;
+        std::cout << "  索引名称: " << index_name << std::endl;
+        std::cout << "    |-- 树高度: " << stats->height.load() << " 层"
+                  << std::endl;
+        std::cout << "    |-- 节点数: "
+                  << FormatNumber(stats->node_count.load()) << " 个"
+                  << std::endl;
+        std::cout << "    |-- 填充率: "
+                  << FormatPercentage(stats->fill_factor.load()) << std::endl;
+        std::cout << "    |-- 操作统计:" << std::endl;
+        std::cout << "        |-- 插入操作: "
+                  << FormatNumber(stats->insertions.load()) << " 次"
+                  << std::endl;
+        std::cout << "        |-- 删除操作: "
+                  << FormatNumber(stats->deletions.load()) << " 次"
+                  << std::endl;
+        std::cout << "        |-- 查找操作: "
+                  << FormatNumber(stats->searches.load()) << " 次" << std::endl;
+        std::cout << "        |-- 节点分裂: "
+                  << FormatNumber(stats->splits.load()) << " 次" << std::endl;
+        std::cout << "        |-- 节点合并: "
+                  << FormatNumber(stats->merges.load()) << " 次" << std::endl;
+    }
+}
+void Statistics::PrintBufferPoolStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 缓冲池统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    uint64_t hits = buffer_pool_hits_.load();
+    uint64_t misses = buffer_pool_misses_.load();
+    uint64_t total_accesses = hits + misses;
+    std::cout << std::endl;
+    std::cout << "  基本信息:" << std::endl;
+    std::cout << "    |-- 缓冲池大小: " << buffer_pool_size_.load() << " 页"
+              << std::endl;
+    std::cout << "    |-- 总访问次数: " << FormatNumber(total_accesses) << " 次"
+              << std::endl;
+    std::cout << std::endl;
+    std::cout << "  命中统计:" << std::endl;
+    std::cout << "    |-- 缓存命中: " << FormatNumber(hits) << " 次"
+              << std::endl;
+    std::cout << "    |-- 缓存未命中: " << FormatNumber(misses) << " 次"
+              << std::endl;
+    std::cout << "    |-- 命中率: " << FormatPercentage(GetBufferPoolHitRatio())
+              << std::endl;
+    std::cout << std::endl;
+    std::cout << "  页面操作:" << std::endl;
+    std::cout << "    |-- 页面淘汰: " << FormatNumber(page_evictions_.load())
+              << " 次" << std::endl;
+    std::cout << "    |-- 页面锁定: " << FormatNumber(page_pins_.load())
+              << " 次" << std::endl;
+    std::cout << "    |-- 页面解锁: " << FormatNumber(page_unpins_.load())
+              << " 次" << std::endl;
+}
+void Statistics::PrintDiskStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 磁盘I/O统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    uint64_t reads = disk_reads_.load();
+    uint64_t writes = disk_writes_.load();
+    uint64_t read_bytes = disk_read_bytes_.load();
+    uint64_t write_bytes = disk_write_bytes_.load();
+    std::cout << std::endl;
+    std::cout << "  I/O操作统计:" << std::endl;
+    std::cout << "    |-- 磁盘读取: " << FormatNumber(reads) << " 次 ("
+              << FormatBytes(read_bytes) << ")" << std::endl;
+    std::cout << "    |-- 磁盘写入: " << FormatNumber(writes) << " 次 ("
+              << FormatBytes(write_bytes) << ")" << std::endl;
+    std::cout << "    |-- 总I/O操作: " << FormatNumber(reads + writes) << " 次"
+              << std::endl;
+    std::cout << std::endl;
+    std::cout << "  页面管理:" << std::endl;
+    std::cout << "    |-- 页面分配: " << FormatNumber(page_allocations_.load())
+              << " 次" << std::endl;
+    std::cout << "    |-- 页面释放: "
+              << FormatNumber(page_deallocations_.load()) << " 次" << std::endl;
+    if (reads + writes > 0) {
+        double read_ratio =
+            (static_cast<double>(reads) / (reads + writes)) * 100.0;
+        std::cout << std::endl;
+        std::cout << "  读写比例:" << std::endl;
+        std::cout << "    |-- 读取/写入: " << FormatPercentage(read_ratio)
+                  << " / " << FormatPercentage(100.0 - read_ratio) << std::endl;
+    }
+}
+void Statistics::PrintTransactionStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 事务统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    uint64_t begins = transaction_begins_.load();
+    uint64_t commits = transaction_commits_.load();
+    uint64_t aborts = transaction_aborts_.load();
+    double total_time = total_transaction_time_ms_.load();
+    std::cout << std::endl;
+    std::cout << "  事务概览:" << std::endl;
+    std::cout << "    |-- 事务总数: " << FormatNumber(begins) << " 个"
+              << std::endl;
+    std::cout << "    |-- 成功提交: " << FormatNumber(commits) << " 个"
+              << std::endl;
+    std::cout << "    |-- 回滚事务: " << FormatNumber(aborts) << " 个"
+              << std::endl;
+    std::cout << "    |-- 成功率: "
+              << FormatPercentage(GetTransactionSuccessRate()) << std::endl;
+    if (begins > 0) {
+        std::cout << std::endl;
+        std::cout << "  性能指标:" << std::endl;
+        std::cout << "    |-- 平均执行时间: " << FormatTime(total_time / begins)
+                  << std::endl;
+    }
+}
+void Statistics::PrintQueryStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 查询统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (query_stats_.empty()) {
+        std::cout << "  暂无查询统计数据" << std::endl;
+        return;
+    }
+    for (const auto& [query_type, stats] : query_stats_) {
+        std::cout << std::endl;
+        std::cout << "  查询类型: " << query_type << std::endl;
+        std::cout << "    |-- 执行次数: " << FormatNumber(stats.count) << " 次"
+                  << std::endl;
+        std::cout << "    |-- 总执行时间: " << FormatTime(stats.total_time_ms)
+                  << std::endl;
+        if (stats.count > 0) {
+            double avg_time = stats.total_time_ms / stats.count;
+            std::cout << "    |-- 平均时间: " << FormatTime(avg_time)
+                      << std::endl;
+            std::cout << "    |-- 最短时间: " << FormatTime(stats.min_time_ms)
+                      << std::endl;
+            std::cout << "    |-- 最长时间: " << FormatTime(stats.max_time_ms)
+                      << std::endl;
+        }
+        if (stats.total_tuples_processed > 0) {
+            std::cout << "    |-- 处理元组数: "
+                      << FormatNumber(stats.total_tuples_processed) << " 个"
+                      << std::endl;
+            if (stats.count > 0) {
+                double avg_tuples =
+                    static_cast<double>(stats.total_tuples_processed) /
+                    stats.count;
+                std::cout << "    |-- 平均元组/查询: " << std::fixed
+                          << std::setprecision(1) << avg_tuples << " 个"
+                          << std::endl;
+            }
+        }
+    }
+}
+void Statistics::PrintLockStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 锁管理统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    uint64_t waits = lock_waits_.load();
+    double total_wait_time = total_lock_wait_time_ms_.load();
+    uint64_t conflicts = lock_conflicts_.load();
+    uint64_t deadlocks = deadlocks_.load();
+    std::cout << std::endl;
+    std::cout << "  锁等待统计:" << std::endl;
+    std::cout << "    |-- 锁等待次数: " << FormatNumber(waits) << " 次"
+              << std::endl;
+    if (waits > 0) {
+        std::cout << "    |-- 平均等待时间: "
+                  << FormatTime(total_wait_time / waits) << std::endl;
+    }
+    std::cout << std::endl;
+    std::cout << "  冲突统计:" << std::endl;
+    std::cout << "    |-- 锁冲突次数: " << FormatNumber(conflicts) << " 次"
+              << std::endl;
+    std::cout << "    |-- 死锁次数: " << FormatNumber(deadlocks) << " 次"
+              << std::endl;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!lock_acquisitions_.empty()) {
+        std::cout << std::endl;
+        std::cout << "  锁获取统计(按类型):" << std::endl;
+        for (const auto& [lock_type, count] : lock_acquisitions_) {
+            std::cout << "    |-- " << lock_type << ": " << FormatNumber(count)
+                      << " 次" << std::endl;
+        }
+    }
+}
+void Statistics::PrintLogStatistics() const {
+    std::cout << "\n" << std::string(65, '-') << std::endl;
+    std::cout << " 日志统计信息" << std::endl;
+    std::cout << std::string(65, '-') << std::endl;
+    uint64_t writes = log_writes_.load();
+    uint64_t write_bytes = log_write_bytes_.load();
+    uint64_t flushes = log_flushes_.load();
+    uint64_t truncations = log_truncations_.load();
+    std::cout << std::endl;
+    std::cout << "  日志操作统计:" << std::endl;
+    std::cout << "    |-- 日志写入: " << FormatNumber(writes) << " 次 ("
+              << FormatBytes(write_bytes) << ")" << std::endl;
+    std::cout << "    |-- 日志刷盘: " << FormatNumber(flushes) << " 次"
+              << std::endl;
+    std::cout << "    |-- 日志截断: " << FormatNumber(truncations) << " 次"
+              << std::endl;
+    if (writes > 0 && write_bytes > 0) {
+        double avg_record_size = static_cast<double>(write_bytes) / writes;
+        std::cout << std::endl;
+        std::cout << "  记录大小:" << std::endl;
+        std::cout << "    |-- 平均记录大小: " << std::fixed
+                  << std::setprecision(1) << avg_record_size << " 字节"
+                  << std::endl;
+    }
+}
+void Statistics::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    buffer_pool_hits_.store(0);
+    buffer_pool_misses_.store(0);
+    buffer_pool_size_.store(0);
+    page_evictions_.store(0);
+    page_pins_.store(0);
+    page_unpins_.store(0);
+    disk_reads_.store(0);
+    disk_writes_.store(0);
+    disk_read_bytes_.store(0);
+    disk_write_bytes_.store(0);
+    page_allocations_.store(0);
+    page_deallocations_.store(0);
+    transaction_begins_.store(0);
+    transaction_commits_.store(0);
+    transaction_aborts_.store(0);
+    total_transaction_time_ms_.store(0.0);
+    lock_waits_.store(0);
+    total_lock_wait_time_ms_.store(0.0);
+    lock_conflicts_.store(0);
+    deadlocks_.store(0);
+    log_writes_.store(0);
+    log_write_bytes_.store(0);
+    log_flushes_.store(0);
+    log_truncations_.store(0);
+    index_creations_.store(0);
+    index_drops_.store(0);
+    index_rebuilds_.store(0);
+    btree_stats_.clear();
+    query_stats_.clear();
+    lock_acquisitions_.clear();
+    LOG_INFO("Statistics: All statistics have been reset");
+}
+std::string Statistics::FormatBytes(uint64_t bytes) const {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    int unit_index = 0;
+    double size = static_cast<double>(bytes);
+    while (size >= 1024.0 && unit_index < 4) {
+        size /= 1024.0;
+        unit_index++;
+    }
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(unit_index == 0 ? 0 : 1) << size
+        << " " << units[unit_index];
+    return oss.str();
+}
+std::string Statistics::FormatNumber(uint64_t number) const {
+    std::ostringstream oss;
+    oss.imbue(std::locale(""));
+    oss << number;
+    return oss.str();
+}
+std::string Statistics::FormatPercentage(double percentage) const {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << percentage << "%";
+    return oss.str();
+}
+std::string Statistics::FormatTime(double time_ms) const {
+    if (time_ms < 1.0) {
+        return std::to_string(static_cast<int>(time_ms * 1000)) + " μs";
+    } else if (time_ms < 1000.0) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << time_ms << " ms";
+        return oss.str();
+    } else {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << (time_ms / 1000.0) << " s";
+        return oss.str();
+    }
+}
+}
+
+
 ========== ./src/storage/disk_manager.cpp ==========
 namespace SimpleRDBMS {
 DiskManager::DiskManager(const std::string& db_file)
@@ -7541,6 +8265,7 @@ void DiskManager::ReadPage(page_id_t page_id, char* page_data) {
     if (read_count < PAGE_SIZE) {
         std::memset(page_data + read_count, 0, PAGE_SIZE - read_count);
     }
+    STATS.RecordDiskRead(PAGE_SIZE);
 }
 void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
     std::lock_guard<std::mutex> lock(latch_);
@@ -7565,21 +8290,13 @@ void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
     }
     db_file_.flush();
     LOG_DEBUG("Flushed page " << page_id << " to disk");
-    FILE* file = fopen(db_file_name_.c_str(), "r+");
-    if (file != nullptr) {
-        int fd = fileno(file);
-        if (fd != -1) {
-            LOG_DEBUG("Calling fsync on file descriptor " << fd);
-            fsync(fd);
-        }
-        fclose(file);
-    }
     if (page_id >= num_pages_) {
         num_pages_ = page_id + 1;
         if (next_page_id_ <= page_id) {
             next_page_id_ = page_id + 1;
         }
     }
+    STATS.RecordDiskWrite(PAGE_SIZE);
     LOG_DEBUG("Successfully wrote page " << page_id << " to disk at offset "
                                          << offset);
 }
@@ -7600,6 +8317,7 @@ page_id_t DiskManager::AllocatePage() {
                      << reused_page << ", allocating new page instead");
         } else {
             LOG_DEBUG("AllocatePage: Reusing deallocated page " << reused_page);
+            STATS.RecordPageAllocation();
             return reused_page;
         }
     }
@@ -7609,6 +8327,7 @@ page_id_t DiskManager::AllocatePage() {
         next_page_id_++;
     }
     num_pages_ = std::max(num_pages_, next_page_id_);
+    STATS.RecordPageAllocation();
     LOG_DEBUG("AllocatePage: Allocated new page " << new_page_id);
     return new_page_id;
 }
@@ -7622,6 +8341,7 @@ void DiskManager::DeallocatePage(page_id_t page_id) {
     }
     if (page_id >= 0 && page_id < next_page_id_) {
         free_pages_.push_back(page_id);
+        STATS.RecordPageDeallocation();
         LOG_DEBUG("DeallocatePage: Deallocated page "
                   << page_id << " (added to free list)");
     }
@@ -7907,9 +8627,11 @@ TransactionManager::~TransactionManager() {
 }
 Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
     LOG_DEBUG("TransactionManager::Begin: Starting new transaction");
+    auto transaction_start_time = std::chrono::high_resolution_clock::now();
     txn_id_t txn_id = GetNextTxnId();
     LOG_DEBUG("TransactionManager::Begin: Assigned transaction ID " << txn_id);
     auto txn = std::make_unique<Transaction>(txn_id, isolation_level);
+    txn->SetStartTime(transaction_start_time);
     if (log_manager_ != nullptr) {
         try {
             LOG_DEBUG("TransactionManager::Begin: Writing begin log record");
@@ -7929,6 +8651,7 @@ Transaction* TransactionManager::Begin(IsolationLevel isolation_level) {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_[txn_id] = std::move(txn);
     }
+    STATS.RecordTransactionBegin();
     LOG_DEBUG("TransactionManager::Begin: Transaction "
               << txn_id << " created successfully");
     return txn_ptr;
@@ -7937,6 +8660,7 @@ bool TransactionManager::Commit(Transaction* txn) {
     if (txn == nullptr) {
         return false;
     }
+    auto commit_start_time = std::chrono::high_resolution_clock::now();
     txn->SetState(TransactionState::COMMITTED);
     if (log_manager_ != nullptr) {
         try {
@@ -7950,10 +8674,16 @@ bool TransactionManager::Commit(Transaction* txn) {
     if (lock_manager_) {
         lock_manager_->UnlockAll(txn);
     }
+    auto transaction_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            commit_start_time - txn->GetStartTime());
+    double duration_ms = transaction_duration.count() / 1000.0;
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+    STATS.RecordTransactionCommit();
+    STATS.RecordTransactionDuration(duration_ms);
     LOG_DEBUG("TransactionManager::Commit: Transaction "
               << txn->GetTxnId() << " committed successfully");
     return true;
@@ -7962,6 +8692,7 @@ bool TransactionManager::Abort(Transaction* txn) {
     if (txn == nullptr) {
         return false;
     }
+    auto abort_start_time = std::chrono::high_resolution_clock::now();
     LOG_DEBUG("TransactionManager::Abort: Aborting transaction "
               << txn->GetTxnId());
     txn->SetState(TransactionState::ABORTED);
@@ -7977,10 +8708,16 @@ bool TransactionManager::Abort(Transaction* txn) {
     if (lock_manager_) {
         lock_manager_->UnlockAll(txn);
     }
+    auto transaction_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            abort_start_time - txn->GetStartTime());
+    double duration_ms = transaction_duration.count() / 1000.0;
     {
         std::lock_guard<std::mutex> lock(txn_map_latch_);
         txn_map_.erase(txn->GetTxnId());
     }
+    STATS.RecordTransactionAbort();
+    STATS.RecordTransactionDuration(duration_ms);
     LOG_DEBUG("TransactionManager::Abort: Transaction "
               << txn->GetTxnId() << " aborted successfully");
     return true;
@@ -9488,6 +10225,9 @@ class LogManager {
     lsn_t GetPersistentLSN() const { return persistent_lsn_.load(); }
     std::vector<std::unique_ptr<LogRecord>> ReadLogRecords();
     void SetEnable(bool enable) { enable_logging_ = enable; }
+    void TruncateLog(lsn_t checkpoint_lsn);
+    void ClearLogFile();
+    size_t GetLogFileSize();
    private:
     DiskManager* disk_manager_;
     char* log_buffer_;
@@ -9500,6 +10240,8 @@ class LogManager {
     std::atomic<bool> flush_thread_running_{false};
     bool enable_logging_{true};
     page_id_t current_log_page_id_{0};
+    std::vector<page_id_t> log_page_ids_;
+    lsn_t last_checkpoint_lsn_{INVALID_LSN};
     void FlushLogBuffer();
     void BackgroundFlush();
 };
@@ -9629,11 +10371,14 @@ class RecoveryManager {
                     LogManager* log_manager, LockManager* lock_manager);
     void Recover();
     void Checkpoint();
+    void CheckpointWithLogTruncation();
    private:
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
     LogManager* log_manager_;
     LockManager* lock_manager_;
+    lsn_t last_checkpoint_lsn_{
+        INVALID_LSN};
     std::unordered_map<txn_id_t, lsn_t> active_txn_table_;
     std::unordered_map<page_id_t, lsn_t> dirty_page_table_;
     void AnalysisPhase(
@@ -9648,6 +10393,181 @@ class RecoveryManager {
     void RedoDelete(const DeleteLogRecord* log_record);
     void UndoDelete(const DeleteLogRecord* log_record);
 };
+}
+
+
+========== ./src/stat/stat.h ==========
+namespace SimpleRDBMS {
+struct BTreeStats {
+    std::atomic<uint64_t> splits{0};
+    std::atomic<uint64_t> merges{0};
+    std::atomic<uint64_t> insertions{0};
+    std::atomic<uint64_t> deletions{0};
+    std::atomic<uint64_t> searches{0};
+    std::atomic<int> node_count{0};
+    std::atomic<int> height{0};
+    std::atomic<double> fill_factor{0.0};
+    std::atomic<uint64_t> last_updated{0};
+    BTreeStats(const BTreeStats& other)
+        : splits(other.splits.load()),
+          merges(other.merges.load()),
+          insertions(other.insertions.load()),
+          deletions(other.deletions.load()),
+          searches(other.searches.load()),
+          node_count(other.node_count.load()),
+          height(other.height.load()),
+          fill_factor(other.fill_factor.load()),
+          last_updated(other.last_updated.load()) {}
+    BTreeStats& operator=(const BTreeStats& other) {
+        if (this != &other) {
+            splits.store(other.splits.load());
+            merges.store(other.merges.load());
+            insertions.store(other.insertions.load());
+            deletions.store(other.deletions.load());
+            searches.store(other.searches.load());
+            node_count.store(other.node_count.load());
+            height.store(other.height.load());
+            fill_factor.store(other.fill_factor.load());
+            last_updated.store(other.last_updated.load());
+        }
+        return *this;
+    }
+    BTreeStats() = default;
+};
+struct QueryStats {
+    uint64_t count = 0;
+    double total_time_ms = 0.0;
+    double min_time_ms = std::numeric_limits<double>::max();
+    double max_time_ms = 0.0;
+    uint64_t total_tuples_processed = 0;
+};
+class Statistics {
+   public:
+    static Statistics& GetInstance() {
+        static Statistics instance;
+        return instance;
+    }
+    Statistics(const Statistics&) = delete;
+    Statistics& operator=(const Statistics&) = delete;
+    void RecordBTreeSplit(const std::string& index_name);
+    void RecordBTreeMerge(const std::string& index_name);
+    void RecordBTreeInsertion(const std::string& index_name);
+    void RecordBTreeDeletion(const std::string& index_name);
+    void RecordBTreeSearch(const std::string& index_name);
+    void UpdateBTreeNodeCount(const std::string& index_name, int node_count);
+    void UpdateBTreeHeight(const std::string& index_name, int height);
+    void UpdateBTreeFillFactor(const std::string& index_name,
+                               double fill_factor);
+    void RecordBufferPoolHit();
+    void RecordBufferPoolMiss();
+    void UpdateBufferPoolSize(int size);
+    void RecordPageEviction();
+    void RecordPagePin();
+    void RecordPageUnpin();
+    void RecordDiskRead(size_t bytes = PAGE_SIZE);
+    void RecordDiskWrite(size_t bytes = PAGE_SIZE);
+    void RecordPageAllocation();
+    void RecordPageDeallocation();
+    void RecordTransactionBegin();
+    void RecordTransactionCommit();
+    void RecordTransactionAbort();
+    void RecordTransactionDuration(double duration_ms);
+    void RecordQueryExecution(const std::string& query_type,
+                              double execution_time_ms,
+                              uint64_t tuples_processed = 0);
+    void RecordLockAcquisition(const std::string& lock_type);
+    void RecordLockWait(double wait_time_ms);
+    void RecordLockConflict();
+    void RecordDeadlock();
+    void RecordLogWrite(size_t bytes);
+    void RecordLogFlush();
+    void RecordLogTruncation();
+    void RecordIndexCreation(const std::string& index_name);
+    void RecordIndexDrop(const std::string& index_name);
+    void RecordIndexRebuild(const std::string& index_name);
+    double GetBufferPoolHitRatio() const;
+    BTreeStats GetBTreeStats(const std::string& index_name) const;
+    QueryStats GetQueryStats(const std::string& query_type) const;
+    uint64_t GetTotalDiskReads() const { return disk_reads_.load(); }
+    uint64_t GetTotalDiskWrites() const { return disk_writes_.load(); }
+    uint64_t GetTotalDiskReadBytes() const { return disk_read_bytes_.load(); }
+    uint64_t GetTotalDiskWriteBytes() const { return disk_write_bytes_.load(); }
+    uint64_t GetTotalTransactions() const { return transaction_begins_.load(); }
+    uint64_t GetCommittedTransactions() const {
+        return transaction_commits_.load();
+    }
+    uint64_t GetAbortedTransactions() const {
+        return transaction_aborts_.load();
+    }
+    double GetTransactionSuccessRate() const;
+    void PrintStatistics() const;
+    void PrintBTreeStatistics() const;
+    void PrintBufferPoolStatistics() const;
+    void PrintDiskStatistics() const;
+    void PrintTransactionStatistics() const;
+    void PrintQueryStatistics() const;
+    void PrintLockStatistics() const;
+    void PrintLogStatistics() const;
+    void Reset();
+    class PerformanceTimer {
+       public:
+        PerformanceTimer()
+            : start_time_(std::chrono::high_resolution_clock::now()) {}
+        double GetElapsedMs() const {
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    end_time - start_time_);
+            return duration.count() / 1000.0;
+        }
+       private:
+        std::chrono::high_resolution_clock::time_point start_time_;
+    };
+   private:
+    Statistics() = default;
+    ~Statistics() = default;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, std::unique_ptr<BTreeStats>> btree_stats_;
+    std::atomic<uint64_t> buffer_pool_hits_{0};
+    std::atomic<uint64_t> buffer_pool_misses_{0};
+    std::atomic<int> buffer_pool_size_{0};
+    std::atomic<uint64_t> page_evictions_{0};
+    std::atomic<uint64_t> page_pins_{0};
+    std::atomic<uint64_t> page_unpins_{0};
+    std::atomic<uint64_t> disk_reads_{0};
+    std::atomic<uint64_t> disk_writes_{0};
+    std::atomic<uint64_t> disk_read_bytes_{0};
+    std::atomic<uint64_t> disk_write_bytes_{0};
+    std::atomic<uint64_t> page_allocations_{0};
+    std::atomic<uint64_t> page_deallocations_{0};
+    std::atomic<uint64_t> transaction_begins_{0};
+    std::atomic<uint64_t> transaction_commits_{0};
+    std::atomic<uint64_t> transaction_aborts_{0};
+    std::atomic<double> total_transaction_time_ms_{0.0};
+    std::unordered_map<std::string, QueryStats> query_stats_;
+    std::unordered_map<std::string, uint64_t> lock_acquisitions_;
+    std::atomic<uint64_t> lock_waits_{0};
+    std::atomic<double> total_lock_wait_time_ms_{0.0};
+    std::atomic<uint64_t> lock_conflicts_{0};
+    std::atomic<uint64_t> deadlocks_{0};
+    std::atomic<uint64_t> log_writes_{0};
+    std::atomic<uint64_t> log_write_bytes_{0};
+    std::atomic<uint64_t> log_flushes_{0};
+    std::atomic<uint64_t> log_truncations_{0};
+    std::atomic<uint64_t> index_creations_{0};
+    std::atomic<uint64_t> index_drops_{0};
+    std::atomic<uint64_t> index_rebuilds_{0};
+    std::string FormatBytes(uint64_t bytes) const;
+    std::string FormatNumber(uint64_t number) const;
+    std::string FormatPercentage(double percentage) const;
+    std::string FormatTime(double time_ms) const;
+};
+    Statistics::PerformanceTimer timer;                                 \
+    auto record_time = [&timer, query_type]() {                         \
+        STATS.RecordQueryExecution(query_type, timer.GetElapsedMs());   \
+    };                                                                  \
+    std::unique_ptr<void, decltype(record_time)> time_recorder(nullptr, \
+                                                               record_time)
 }
 
 
@@ -9780,11 +10700,19 @@ class Transaction {
         return write_set_;
     }
     bool IsAborted() const { return state_ == TransactionState::ABORTED; }
+    std::chrono::high_resolution_clock::time_point GetStartTime() const {
+        return start_time_;
+    }
+    void SetStartTime(
+        const std::chrono::high_resolution_clock::time_point& start_time) {
+        start_time_ = start_time;
+    }
    private:
     txn_id_t txn_id_;
     TransactionState state_;
     IsolationLevel isolation_level_;
     lsn_t prev_lsn_;
+    std::chrono::high_resolution_clock::time_point start_time_;
     std::unordered_set<RID> shared_lock_set_;
     std::unordered_set<RID> exclusive_lock_set_;
     std::unordered_map<RID, Tuple> write_set_;

@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include "common/exception.h"
+#include "stat/stat.h"
 
 namespace SimpleRDBMS {
 
@@ -103,6 +104,8 @@ void DiskManager::ReadPage(page_id_t page_id, char* page_data) {
     if (read_count < PAGE_SIZE) {
         std::memset(page_data + read_count, 0, PAGE_SIZE - read_count);
     }
+
+    STATS.RecordDiskRead(PAGE_SIZE);
 }
 
 /**
@@ -175,6 +178,8 @@ void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
         }
     }
 
+    STATS.RecordDiskWrite(PAGE_SIZE);
+
     LOG_DEBUG("Successfully wrote page " << page_id << " to disk at offset "
                                          << offset);
 }
@@ -217,6 +222,7 @@ page_id_t DiskManager::AllocatePage() {
             // 继续分配新页面
         } else {
             LOG_DEBUG("AllocatePage: Reusing deallocated page " << reused_page);
+            STATS.RecordPageAllocation();
             return reused_page;
         }
     }
@@ -230,6 +236,9 @@ page_id_t DiskManager::AllocatePage() {
     }
 
     num_pages_ = std::max(num_pages_, next_page_id_);
+
+    STATS.RecordPageAllocation();
+
     LOG_DEBUG("AllocatePage: Allocated new page " << new_page_id);
     return new_page_id;
 }
@@ -260,6 +269,9 @@ void DiskManager::DeallocatePage(page_id_t page_id) {
 
     if (page_id >= 0 && page_id < next_page_id_) {
         free_pages_.push_back(page_id);
+
+        STATS.RecordPageDeallocation();
+        
         LOG_DEBUG("DeallocatePage: Deallocated page "
                   << page_id << " (added to free list)");
     }
