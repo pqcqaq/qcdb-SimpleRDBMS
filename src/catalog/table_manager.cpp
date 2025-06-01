@@ -36,41 +36,43 @@ TableManager::~TableManager() {
 
 void TableManager::RebuildAllIndexes() {
     LOG_DEBUG("TableManager::RebuildAllIndexes: Starting index rebuild");
-    
+
     // 获取所有表名
     std::vector<std::string> table_names = catalog_->GetAllTableNames();
-    
+
     for (const auto& table_name : table_names) {
         // 获取该表的所有索引
         std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
-        
+
         for (auto* index_info : indexes) {
-            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index " << index_info->index_name);
-            
+            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index "
+                      << index_info->index_name);
+
             TableInfo* table_info = catalog_->GetTable(table_name);
             if (!table_info) {
-                LOG_ERROR("TableManager::RebuildAllIndexes: Table " << table_name << " not found");
+                LOG_ERROR("TableManager::RebuildAllIndexes: Table "
+                          << table_name << " not found");
                 continue;
             }
-            
+
             // 重新创建物理索引
             bool success = index_manager_->CreateIndex(
-                index_info->index_name,
-                table_name,
-                index_info->key_columns,
-                table_info->schema.get()
-            );
-            
+                index_info->index_name, table_name, index_info->key_columns,
+                table_info->schema.get());
+
             if (!success) {
-                LOG_ERROR("TableManager::RebuildAllIndexes: Failed to rebuild index " << index_info->index_name);
+                LOG_ERROR(
+                    "TableManager::RebuildAllIndexes: Failed to rebuild index "
+                    << index_info->index_name);
                 continue;
             }
-            
+
             // 用现有数据填充索引
-            PopulateIndexWithExistingData(index_info->index_name, table_info, index_info->key_columns);
+            PopulateIndexWithExistingData(index_info->index_name, table_info,
+                                          index_info->key_columns);
         }
     }
-    
+
     LOG_DEBUG("TableManager::RebuildAllIndexes: Index rebuild completed");
 }
 
@@ -290,20 +292,22 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                                          const Tuple& tuple, const RID& rid) {
     LOG_TRACE("TableManager::UpdateIndexesOnInsert: Updating indexes for table "
               << table_name);
-    
+
     if (!index_manager_) {
         LOG_WARN("TableManager::UpdateIndexesOnInsert: IndexManager is null");
-        return true; // 没有索引管理器，认为成功
+        return true;  // 没有索引管理器，认为成功
     }
-    
+
     std::vector<std::string> table_indexes;
     try {
         table_indexes = index_manager_->GetTableIndexes(table_name);
     } catch (const std::exception& e) {
-        LOG_ERROR("TableManager::UpdateIndexesOnInsert: Failed to get table indexes: " << e.what());
+        LOG_ERROR(
+            "TableManager::UpdateIndexesOnInsert: Failed to get table indexes: "
+            << e.what());
         return false;
     }
-    
+
     bool all_success = true;
     for (const auto& index_name : table_indexes) {
         IndexInfo* index_info = catalog_->GetIndex(index_name);
@@ -313,7 +317,7 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                 << index_name);
             continue;
         }
-        
+
         if (index_info->key_columns.size() != 1) {
             LOG_WARN(
                 "TableManager::UpdateIndexesOnInsert: Multi-column index not "
@@ -339,21 +343,28 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
             // 添加超时保护
             auto start_time = std::chrono::steady_clock::now();
             const auto TIMEOUT_DURATION = std::chrono::seconds(5);
-            
+
             bool success = false;
             try {
-                success = index_manager_->InsertEntry(index_name, key_value, rid);
-                
+                success =
+                    index_manager_->InsertEntry(index_name, key_value, rid);
+
                 auto current_time = std::chrono::steady_clock::now();
                 if (current_time - start_time > TIMEOUT_DURATION) {
-                    LOG_ERROR("TableManager::UpdateIndexesOnInsert: Index insert timed out for " << index_name);
+                    LOG_ERROR(
+                        "TableManager::UpdateIndexesOnInsert: Index insert "
+                        "timed out for "
+                        << index_name);
                     success = false;
                 }
             } catch (const std::exception& e) {
-                LOG_ERROR("TableManager::UpdateIndexesOnInsert: Exception during index insert: " << e.what());
+                LOG_ERROR(
+                    "TableManager::UpdateIndexesOnInsert: Exception during "
+                    "index insert: "
+                    << e.what());
                 success = false;
             }
-            
+
             if (!success) {
                 LOG_WARN(
                     "TableManager::UpdateIndexesOnInsert: Failed to insert "
@@ -641,20 +652,38 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
 }
 
 bool TableManager::DropTable(const std::string& table_name) {
-    // Check if table exists
+    LOG_DEBUG("TableManager::DropTable: Dropping table " << table_name);
+
     TableInfo* table_info = catalog_->GetTable(table_name);
     if (table_info == nullptr) {
-        return false;  // Table doesn't exist
+        LOG_WARN("TableManager::DropTable: Table " << table_name
+                                                   << " not found");
+        return false;
     }
 
-    // Drop all indexes on this table
+    // 首先删除该表的所有索引
     std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
     for (auto* index_info : indexes) {
-        DropIndex(index_info->index_name);
+        LOG_DEBUG("TableManager::DropTable: Dropping index "
+                  << index_info->index_name);
+        bool index_dropped = DropIndex(index_info->index_name);
+        if (!index_dropped) {
+            LOG_WARN("TableManager::DropTable: Failed to drop index "
+                     << index_info->index_name);
+        }
     }
 
-    // Drop the table
-    return catalog_->DropTable(table_name);
+    // 然后删除表
+    bool success = catalog_->DropTable(table_name);
+    if (success) {
+        LOG_DEBUG("TableManager::DropTable: Successfully dropped table "
+                  << table_name);
+    } else {
+        LOG_ERROR("TableManager::DropTable: Failed to drop table "
+                  << table_name);
+    }
+
+    return success;
 }
 
 }  // namespace SimpleRDBMS

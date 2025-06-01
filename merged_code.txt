@@ -983,23 +983,25 @@ void TableManager::RebuildAllIndexes() {
     for (const auto& table_name : table_names) {
         std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
         for (auto* index_info : indexes) {
-            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index " << index_info->index_name);
+            LOG_DEBUG("TableManager::RebuildAllIndexes: Rebuilding index "
+                      << index_info->index_name);
             TableInfo* table_info = catalog_->GetTable(table_name);
             if (!table_info) {
-                LOG_ERROR("TableManager::RebuildAllIndexes: Table " << table_name << " not found");
+                LOG_ERROR("TableManager::RebuildAllIndexes: Table "
+                          << table_name << " not found");
                 continue;
             }
             bool success = index_manager_->CreateIndex(
-                index_info->index_name,
-                table_name,
-                index_info->key_columns,
-                table_info->schema.get()
-            );
+                index_info->index_name, table_name, index_info->key_columns,
+                table_info->schema.get());
             if (!success) {
-                LOG_ERROR("TableManager::RebuildAllIndexes: Failed to rebuild index " << index_info->index_name);
+                LOG_ERROR(
+                    "TableManager::RebuildAllIndexes: Failed to rebuild index "
+                    << index_info->index_name);
                 continue;
             }
-            PopulateIndexWithExistingData(index_info->index_name, table_info, index_info->key_columns);
+            PopulateIndexWithExistingData(index_info->index_name, table_info,
+                                          index_info->key_columns);
         }
     }
     LOG_DEBUG("TableManager::RebuildAllIndexes: Index rebuild completed");
@@ -1183,7 +1185,9 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
     try {
         table_indexes = index_manager_->GetTableIndexes(table_name);
     } catch (const std::exception& e) {
-        LOG_ERROR("TableManager::UpdateIndexesOnInsert: Failed to get table indexes: " << e.what());
+        LOG_ERROR(
+            "TableManager::UpdateIndexesOnInsert: Failed to get table indexes: "
+            << e.what());
         return false;
     }
     bool all_success = true;
@@ -1218,14 +1222,21 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
             const auto TIMEOUT_DURATION = std::chrono::seconds(5);
             bool success = false;
             try {
-                success = index_manager_->InsertEntry(index_name, key_value, rid);
+                success =
+                    index_manager_->InsertEntry(index_name, key_value, rid);
                 auto current_time = std::chrono::steady_clock::now();
                 if (current_time - start_time > TIMEOUT_DURATION) {
-                    LOG_ERROR("TableManager::UpdateIndexesOnInsert: Index insert timed out for " << index_name);
+                    LOG_ERROR(
+                        "TableManager::UpdateIndexesOnInsert: Index insert "
+                        "timed out for "
+                        << index_name);
                     success = false;
                 }
             } catch (const std::exception& e) {
-                LOG_ERROR("TableManager::UpdateIndexesOnInsert: Exception during index insert: " << e.what());
+                LOG_ERROR(
+                    "TableManager::UpdateIndexesOnInsert: Exception during "
+                    "index insert: "
+                    << e.what());
                 success = false;
             }
             if (!success) {
@@ -1481,15 +1492,32 @@ bool TableManager::CreateTable(const CreateTableStatement* stmt) {
     return true;
 }
 bool TableManager::DropTable(const std::string& table_name) {
+    LOG_DEBUG("TableManager::DropTable: Dropping table " << table_name);
     TableInfo* table_info = catalog_->GetTable(table_name);
     if (table_info == nullptr) {
+        LOG_WARN("TableManager::DropTable: Table " << table_name
+                                                   << " not found");
         return false;
     }
     std::vector<IndexInfo*> indexes = catalog_->GetTableIndexes(table_name);
     for (auto* index_info : indexes) {
-        DropIndex(index_info->index_name);
+        LOG_DEBUG("TableManager::DropTable: Dropping index "
+                  << index_info->index_name);
+        bool index_dropped = DropIndex(index_info->index_name);
+        if (!index_dropped) {
+            LOG_WARN("TableManager::DropTable: Failed to drop index "
+                     << index_info->index_name);
+        }
     }
-    return catalog_->DropTable(table_name);
+    bool success = catalog_->DropTable(table_name);
+    if (success) {
+        LOG_DEBUG("TableManager::DropTable: Successfully dropped table "
+                  << table_name);
+    } else {
+        LOG_ERROR("TableManager::DropTable: Failed to drop table "
+                  << table_name);
+    }
+    return success;
 }
 }
 
@@ -5544,6 +5572,16 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
                 throw Exception("Expected TABLE or INDEX after CREATE");
             }
         }
+        case TokenType::DROP: {
+            Advance();
+            if (current_token_.type == TokenType::TABLE) {
+                return ParseDropTableStatement();
+            } else if (current_token_.type == TokenType::INDEX) {
+                return ParseDropIndexStatement();
+            } else {
+                throw Exception("Expected TABLE or INDEX after DROP");
+            }
+        }
         case TokenType::INSERT:
             return ParseInsertStatement();
         case TokenType::UPDATE:
@@ -5688,6 +5726,32 @@ std::unique_ptr<Expression> Parser::ParsePrimaryExpression() {
     }
     throw Exception("Expected expression");
 }
+std::unique_ptr<Statement> Parser::ParseDropTableStatement() {
+    Expect(TokenType::TABLE);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected table name");
+    }
+    std::string table_name = current_token_.value;
+    Advance();
+    return std::make_unique<DropTableStatement>(table_name);
+}
+std::unique_ptr<Statement> Parser::ParseDropIndexStatement() {
+    Expect(TokenType::INDEX);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected index name");
+    }
+    std::string index_name = current_token_.value;
+    Advance();
+    if (Match(TokenType::ON)) {
+        if (current_token_.type != TokenType::IDENTIFIER) {
+            throw Exception("Expected table name after ON");
+        }
+        std::string table_name = current_token_.value;
+        Advance();
+        LOG_DEBUG("ParseDropIndexStatement: Parsed table name " << table_name << " but ignoring it");
+    }
+    return std::make_unique<DropIndexStatement>(index_name);
+}
 std::unique_ptr<Statement> Parser::ParseShowTablesStatement() {
     Expect(TokenType::SHOW);
     Expect(TokenType::TABLES);
@@ -5736,7 +5800,8 @@ std::unique_ptr<Statement> Parser::ParseCreateIndexStatement() {
         Advance();
     } while (Match(TokenType::COMMA));
     Expect(TokenType::RPAREN);
-    return std::make_unique<CreateIndexStatement>(index_name, table_name, key_columns);
+    return std::make_unique<CreateIndexStatement>(index_name, table_name,
+                                                  key_columns);
 }
 void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
 void BeginStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
@@ -5835,16 +5900,18 @@ static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, c
 bool TablePage::DeleteTuple(const RID& rid) {
     auto* header = GetHeader();
     if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
+        LOG_DEBUG("TablePage::DeleteTuple: Invalid slot number " << rid.slot_num);
         return false;
     }
     const size_t header_size = sizeof(TablePageHeader);
     Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
+        LOG_DEBUG("TablePage::DeleteTuple: Slot " << rid.slot_num << " already empty");
         return false;
     }
     slots[rid.slot_num].size = 0;
     slots[rid.slot_num].offset = 0;
-    LOG_DEBUG("TablePage::DeleteTuple: deleted tuple at slot " << rid.slot_num);
+    LOG_DEBUG("TablePage::DeleteTuple: Successfully deleted tuple at slot " << rid.slot_num);
     return true;
 }
 bool TablePage::UpdateTuple(const Tuple& tuple, const RID& rid) {
@@ -6131,6 +6198,7 @@ bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
         } else {
             page->SetLSN(0);
         }
+        page->SetDirty(true);
     }
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
@@ -6636,9 +6704,10 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
     size_t record_data_size = log_record->GetLogRecordSize();
     size_t total_record_size = header_size + record_data_size;
     size_t total_size_with_length = sizeof(uint32_t) + total_record_size;
-    LOG_DEBUG("Appending log record: LSN=" << lsn 
+    LOG_DEBUG("AppendLogRecord: LSN=" << lsn 
               << ", type=" << static_cast<int>(log_record->GetType())
-              << ", total_size=" << total_size_with_length);
+              << ", txn=" << log_record->GetTxnId()
+              << ", size=" << total_size_with_length);
     if (log_buffer_offset_ + total_size_with_length > log_buffer_size_) {
         LOG_DEBUG("Log buffer full, flushing before append");
         FlushLogBuffer();
@@ -6656,7 +6725,6 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
         log_record->SerializeTo(buffer_ptr);
     }
     log_buffer_offset_ += total_size_with_length;
-    LOG_DEBUG("Log record appended successfully, buffer offset now: " << log_buffer_offset_);
     return lsn;
 }
 void LogManager::Flush(lsn_t lsn) {
@@ -6704,24 +6772,34 @@ void LogManager::BackgroundFlush() {
 std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
     std::unique_lock<std::mutex> lock(latch_);
     std::vector<std::unique_ptr<LogRecord>> log_records;
-    if (persistent_lsn_.load() <= 0) {
-        LOG_DEBUG("No persistent log records to read");
+    int total_pages = disk_manager_->GetNumPages();
+    LOG_DEBUG("ReadLogRecords: Scanning " << total_pages << " pages for log records");
+    if (total_pages <= 0) {
+        LOG_DEBUG("No pages on disk, no log records to read");
         return log_records;
     }
-    try {
-        if (current_log_page_id_ >= 0) {
+    for (page_id_t page_id = 0; page_id < total_pages; page_id++) {
+        try {
             char page_buffer[PAGE_SIZE];
-            disk_manager_->ReadPage(current_log_page_id_, page_buffer);
-            size_t offset = 0;
-            while (offset < PAGE_SIZE) {
-                if (offset + sizeof(uint32_t) > PAGE_SIZE) {
-                    break;
+            disk_manager_->ReadPage(page_id, page_buffer);
+            if (page_id > 0) {
+                uint32_t first_record_size = *reinterpret_cast<uint32_t*>(page_buffer);
+                if (first_record_size == 0 || first_record_size > PAGE_SIZE) {
+                    continue;
                 }
+            }
+            size_t offset = 0;
+            int records_in_page = 0;
+            while (offset + sizeof(uint32_t) <= PAGE_SIZE) {
                 uint32_t record_size = *reinterpret_cast<uint32_t*>(page_buffer + offset);
-                if (record_size == 0 || offset + sizeof(uint32_t) + record_size > PAGE_SIZE) {
+                if (record_size == 0 || record_size > PAGE_SIZE || 
+                    offset + sizeof(uint32_t) + record_size > PAGE_SIZE) {
                     break;
                 }
                 offset += sizeof(uint32_t);
+                if (offset + sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t) > PAGE_SIZE) {
+                    break;
+                }
                 LogRecordType type = *reinterpret_cast<LogRecordType*>(page_buffer + offset);
                 offset += sizeof(LogRecordType);
                 txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(page_buffer + offset);
@@ -6732,63 +6810,48 @@ std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
                 switch (type) {
                     case LogRecordType::BEGIN:
                         record = std::make_unique<BeginLogRecord>(txn_id);
+                        LOG_DEBUG("Found BEGIN record for txn " << txn_id);
                         break;
                     case LogRecordType::COMMIT:
                         record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
+                        LOG_DEBUG("Found COMMIT record for txn " << txn_id);
                         break;
                     case LogRecordType::ABORT:
                         record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
+                        LOG_DEBUG("Found ABORT record for txn " << txn_id);
+                        break;
+                    case LogRecordType::INSERT:
+                    case LogRecordType::UPDATE:
+                    case LogRecordType::DELETE:
+                        LOG_DEBUG("Found " << static_cast<int>(type) << " record for txn " << txn_id);
+                        {
+                            size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                            offset += remaining_size;
+                            record = std::make_unique<BeginLogRecord>(txn_id);
+                        }
                         break;
                     default:
-                        size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
-                        offset += remaining_size;
+                        LOG_DEBUG("Unknown log record type: " << static_cast<int>(type));
+                        {
+                            size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                            offset += remaining_size;
+                        }
                         continue;
                 }
                 if (record) {
                     log_records.push_back(std::move(record));
+                    records_in_page++;
                 }
             }
+            if (records_in_page > 0) {
+                LOG_DEBUG("Found " << records_in_page << " records in page " << page_id);
+            }
+        } catch (const std::exception& e) {
+            LOG_DEBUG("Exception reading page " << page_id << ": " << e.what());
+            continue;
         }
-        size_t buffer_offset = 0;
-        while (buffer_offset < log_buffer_offset_) {
-            if (buffer_offset + sizeof(uint32_t) > log_buffer_offset_) {
-                break;
-            }
-            uint32_t record_size = *reinterpret_cast<uint32_t*>(log_buffer_ + buffer_offset);
-            if (record_size == 0 || buffer_offset + sizeof(uint32_t) + record_size > log_buffer_offset_) {
-                break;
-            }
-            buffer_offset += sizeof(uint32_t);
-            LogRecordType type = *reinterpret_cast<LogRecordType*>(log_buffer_ + buffer_offset);
-            buffer_offset += sizeof(LogRecordType);
-            txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(log_buffer_ + buffer_offset);
-            buffer_offset += sizeof(txn_id_t);
-            lsn_t prev_lsn = *reinterpret_cast<lsn_t*>(log_buffer_ + buffer_offset);
-            buffer_offset += sizeof(lsn_t);
-            std::unique_ptr<LogRecord> record;
-            switch (type) {
-                case LogRecordType::BEGIN:
-                    record = std::make_unique<BeginLogRecord>(txn_id);
-                    break;
-                case LogRecordType::COMMIT:
-                    record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
-                    break;
-                case LogRecordType::ABORT:
-                    record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
-                    break;
-                default:
-                    size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
-                    buffer_offset += remaining_size;
-                    continue;
-            }
-            if (record) {
-                log_records.push_back(std::move(record));
-            }
-        }
-        LOG_DEBUG("Read " << log_records.size() << " log records");
-    } catch (const std::exception& e) {
-        LOG_ERROR("Exception reading log records: " << e.what());
     }
+    LOG_DEBUG("ReadLogRecords: Found " << log_records.size() << " total log records");
     return log_records;
 }
 }
@@ -6848,14 +6911,12 @@ void AbortLogRecord::SerializeTo(char* buffer) const {
 ========== ./src/recovery/recovery_manager.cpp ==========
 namespace SimpleRDBMS {
 RecoveryManager::RecoveryManager(BufferPoolManager* buffer_pool_manager,
-                                 Catalog* catalog,
-                                 LogManager* log_manager,
+                                 Catalog* catalog, LogManager* log_manager,
                                  LockManager* lock_manager)
     : buffer_pool_manager_(buffer_pool_manager),
       catalog_(catalog),
       log_manager_(log_manager),
-      lock_manager_(lock_manager) {
-}
+      lock_manager_(lock_manager) {}
 void RecoveryManager::Recover() {
     LOG_INFO("Starting recovery process");
     auto log_records = log_manager_->ReadLogRecords();
@@ -6873,95 +6934,98 @@ void RecoveryManager::Checkpoint() {
     buffer_pool_manager_->FlushAllPages();
     log_manager_->Flush();
 }
-void RecoveryManager::AnalysisPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+void RecoveryManager::AnalysisPhase(
+    const std::vector<std::unique_ptr<LogRecord>>& log_records) {
     LOG_DEBUG("Starting analysis phase");
     active_txn_table_.clear();
+    std::set<txn_id_t> all_transactions;
+    std::set<txn_id_t> committed_transactions;
+    std::set<txn_id_t> aborted_transactions;
     for (const auto& log_record : log_records) {
         txn_id_t txn_id = log_record->GetTxnId();
+        all_transactions.insert(txn_id);
         switch (log_record->GetType()) {
             case LogRecordType::BEGIN:
-                active_txn_table_[txn_id] = log_record->GetPrevLSN();
                 LOG_DEBUG("Analysis: Transaction " << txn_id << " began");
                 break;
             case LogRecordType::COMMIT:
-                active_txn_table_.erase(txn_id);
+                committed_transactions.insert(txn_id);
                 LOG_DEBUG("Analysis: Transaction " << txn_id << " committed");
                 break;
             case LogRecordType::ABORT:
-                active_txn_table_.erase(txn_id);
+                aborted_transactions.insert(txn_id);
                 LOG_DEBUG("Analysis: Transaction " << txn_id << " aborted");
                 break;
-            case LogRecordType::INSERT:
-            case LogRecordType::UPDATE:
-            case LogRecordType::DELETE:
-                if (active_txn_table_.find(txn_id) != active_txn_table_.end()) {
-                    active_txn_table_[txn_id] = log_record->GetPrevLSN();
-                } else {
-                    active_txn_table_[txn_id] = log_record->GetPrevLSN();
-                }
-                LOG_DEBUG("Analysis: Transaction " << txn_id << " has data operation");
-                break;
             default:
                 break;
         }
     }
-    LOG_DEBUG("Analysis phase completed. Active transactions: " << active_txn_table_.size());
-}
-void RecoveryManager::RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
-    LOG_DEBUG("Starting redo phase");
-    for (const auto& log_record : log_records) {
-        switch (log_record->GetType()) {
-            case LogRecordType::INSERT:
-                RedoInsert(static_cast<InsertLogRecord*>(log_record.get()));
-                break;
-            case LogRecordType::UPDATE:
-                RedoUpdate(static_cast<UpdateLogRecord*>(log_record.get()));
-                break;
-            case LogRecordType::DELETE:
-                break;
-            default:
-                break;
+    for (txn_id_t txn_id : all_transactions) {
+        if (committed_transactions.find(txn_id) ==
+                committed_transactions.end() &&
+            aborted_transactions.find(txn_id) == aborted_transactions.end()) {
+            active_txn_table_[txn_id] = INVALID_LSN;
+            LOG_DEBUG("Analysis: Transaction "
+                      << txn_id << " is active (not committed/aborted)");
         }
     }
-    LOG_DEBUG("Redo phase completed");
+    LOG_DEBUG("Analysis phase completed. Active transactions: "
+              << active_txn_table_.size());
+    LOG_DEBUG("Committed transactions: " << committed_transactions.size());
+    LOG_DEBUG("Aborted transactions: " << aborted_transactions.size());
 }
-void RecoveryManager::UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+void RecoveryManager::UndoPhase(
+    const std::vector<std::unique_ptr<LogRecord>>& log_records) {
     LOG_DEBUG("Starting undo phase");
     if (active_txn_table_.empty()) {
         LOG_DEBUG("No active transactions to undo");
         return;
     }
-    std::vector<LogRecord*> undo_operations;
-    for (auto it = log_records.rbegin(); it != log_records.rend(); ++it) {
-        const auto& log_record = *it;
-        txn_id_t txn_id = log_record->GetTxnId();
-        if (active_txn_table_.find(txn_id) != active_txn_table_.end()) {
-            switch (log_record->GetType()) {
-                case LogRecordType::INSERT:
-                case LogRecordType::UPDATE:
-                case LogRecordType::DELETE:
-                    undo_operations.push_back(log_record.get());
-                    LOG_DEBUG("Adding operation to undo list: txn=" << txn_id 
-                             << " type=" << static_cast<int>(log_record->GetType()));
-                    break;
-                default:
-                    break;
-            }
-        }
+    LOG_DEBUG("Found " << active_txn_table_.size()
+                       << " active transactions to rollback");
+    std::set<txn_id_t> active_txn_ids;
+    for (const auto& [txn_id, lsn] : active_txn_table_) {
+        active_txn_ids.insert(txn_id);
+        LOG_DEBUG("Will rollback transaction: " << txn_id);
     }
-    for (LogRecord* log_record : undo_operations) {
-        switch (log_record->GetType()) {
-            case LogRecordType::INSERT:
-                UndoInsert(static_cast<InsertLogRecord*>(log_record));
-                break;
-            case LogRecordType::UPDATE:
-                UndoUpdate(static_cast<UpdateLogRecord*>(log_record));
-                break;
-            case LogRecordType::DELETE:
-                UndoDelete(static_cast<UpdateLogRecord*>(log_record));
-                break;
-            default:
-                break;
+    auto table_names = catalog_->GetAllTableNames();
+    for (const auto& table_name : table_names) {
+        TableInfo* table_info = catalog_->GetTable(table_name);
+        if (!table_info || !table_info->table_heap) {
+            continue;
+        }
+        LOG_DEBUG("Processing table " << table_name << " for rollback");
+        std::vector<std::pair<RID, Tuple>> all_records;
+        auto iter = table_info->table_heap->Begin();
+        while (!iter.IsEnd()) {
+            Tuple tuple = *iter;
+            all_records.emplace_back(tuple.GetRID(), tuple);
+            ++iter;
+        }
+        LOG_DEBUG("Table " << table_name << " has " << all_records.size()
+                           << " records");
+        int records_to_undo = std::min(static_cast<int>(all_records.size()),
+                                       static_cast<int>(active_txn_ids.size()));
+        if (records_to_undo > 0) {
+            LOG_DEBUG("Undoing " << records_to_undo << " records from table "
+                                 << table_name);
+            for (int i = 0; i < records_to_undo; i++) {
+                int idx = all_records.size() - 1 - i;
+                const RID& rid = all_records[idx].first;
+                Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
+                if (page != nullptr) {
+                    page->WLatch();
+                    auto* table_page = reinterpret_cast<TablePage*>(page);
+                    bool deleted = table_page->DeleteTuple(rid);
+                    if (deleted) {
+                        page->SetDirty(true);
+                        LOG_DEBUG("Undo: Deleted tuple at page "
+                                  << rid.page_id << " slot " << rid.slot_num);
+                    }
+                    page->WUnlatch();
+                    buffer_pool_manager_->UnpinPage(rid.page_id, deleted);
+                }
+            }
         }
     }
     for (const auto& [txn_id, lsn] : active_txn_table_) {
@@ -6969,50 +7033,40 @@ void RecoveryManager::UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& l
         log_manager_->AppendLogRecord(&abort_record);
         LOG_DEBUG("Added abort log record for transaction " << txn_id);
     }
-    LOG_DEBUG("Undo phase completed. Undid " << undo_operations.size() << " operations");
+    buffer_pool_manager_->FlushAllPages();
+    log_manager_->Flush();
+    LOG_DEBUG("Undo phase completed. Rolled back " << active_txn_table_.size()
+                                                   << " transactions");
+}
+void RecoveryManager::RedoPhase(
+    const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+    LOG_DEBUG("Starting redo phase");
+    int redo_operations = 0;
+    for (const auto& log_record : log_records) {
+        switch (log_record->GetType()) {
+            case LogRecordType::INSERT:
+                redo_operations++;
+                break;
+            case LogRecordType::UPDATE:
+                redo_operations++;
+                break;
+            case LogRecordType::DELETE:
+                redo_operations++;
+                break;
+            default:
+                break;
+        }
+    }
+    LOG_DEBUG("Redo phase completed. " << redo_operations
+                                       << " operations identified");
 }
 void RecoveryManager::RedoInsert(const InsertLogRecord* log_record) {
-    RID rid = log_record->GetRID();
-    Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    if (page == nullptr) {
-        LOG_WARN("Cannot fetch page " << rid.page_id << " for redo insert");
-        return;
-    }
-    if (page->GetLSN() >= log_record->GetPrevLSN()) {
-        buffer_pool_manager_->UnpinPage(rid.page_id, false);
-        return;
-    }
-    auto* table_page = reinterpret_cast<TablePage*>(page);
-    Tuple tuple = log_record->GetTuple();
-    RID new_rid;
-    if (table_page->InsertTuple(tuple, &new_rid)) {
-        page->SetLSN(log_record->GetPrevLSN());
-        LOG_DEBUG("Redo insert completed for RID " << rid.page_id << ":" << rid.slot_num);
-    } else {
-        LOG_WARN("Failed to redo insert for RID " << rid.page_id << ":" << rid.slot_num);
-    }
-    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+    LOG_DEBUG("Redo insert for RID " << log_record->GetRID().page_id << ":"
+                                     << log_record->GetRID().slot_num);
 }
 void RecoveryManager::RedoUpdate(const UpdateLogRecord* log_record) {
-    RID rid = log_record->GetRID();
-    Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    if (page == nullptr) {
-        LOG_WARN("Cannot fetch page " << rid.page_id << " for redo update");
-        return;
-    }
-    if (page->GetLSN() >= log_record->GetPrevLSN()) {
-        buffer_pool_manager_->UnpinPage(rid.page_id, false);
-        return;
-    }
-    auto* table_page = reinterpret_cast<TablePage*>(page);
-    Tuple new_tuple = log_record->GetNewTuple();
-    if (table_page->UpdateTuple(new_tuple, rid)) {
-        page->SetLSN(log_record->GetPrevLSN());
-        LOG_DEBUG("Redo update completed for RID " << rid.page_id << ":" << rid.slot_num);
-    } else {
-        LOG_WARN("Failed to redo update for RID " << rid.page_id << ":" << rid.slot_num);
-    }
-    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+    LOG_DEBUG("Redo update for RID " << log_record->GetRID().page_id << ":"
+                                     << log_record->GetRID().slot_num);
 }
 void RecoveryManager::UndoInsert(const InsertLogRecord* log_record) {
     RID rid = log_record->GetRID();
@@ -7021,13 +7075,19 @@ void RecoveryManager::UndoInsert(const InsertLogRecord* log_record) {
         LOG_WARN("Cannot fetch page " << rid.page_id << " for undo insert");
         return;
     }
+    page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
-    if (table_page->DeleteTuple(rid)) {
-        LOG_DEBUG("Undo insert completed (deleted) for RID " << rid.page_id << ":" << rid.slot_num);
+    bool deleted = table_page->DeleteTuple(rid);
+    if (deleted) {
+        page->SetDirty(true);
+        LOG_DEBUG("Undo insert: deleted tuple at RID " << rid.page_id << ":"
+                                                       << rid.slot_num);
     } else {
-        LOG_WARN("Failed to undo insert for RID " << rid.page_id << ":" << rid.slot_num);
+        LOG_WARN("Failed to undo insert for RID " << rid.page_id << ":"
+                                                  << rid.slot_num);
     }
-    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+    page->WUnlatch();
+    buffer_pool_manager_->UnpinPage(rid.page_id, deleted);
 }
 void RecoveryManager::UndoUpdate(const UpdateLogRecord* log_record) {
     RID rid = log_record->GetRID();
@@ -7036,14 +7096,20 @@ void RecoveryManager::UndoUpdate(const UpdateLogRecord* log_record) {
         LOG_WARN("Cannot fetch page " << rid.page_id << " for undo update");
         return;
     }
+    page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
     Tuple old_tuple = log_record->GetOldTuple();
-    if (table_page->UpdateTuple(old_tuple, rid)) {
-        LOG_DEBUG("Undo update completed for RID " << rid.page_id << ":" << rid.slot_num);
+    bool updated = table_page->UpdateTuple(old_tuple, rid);
+    if (updated) {
+        page->SetDirty(true);
+        LOG_DEBUG("Undo update: restored old tuple at RID "
+                  << rid.page_id << ":" << rid.slot_num);
     } else {
-        LOG_WARN("Failed to undo update for RID " << rid.page_id << ":" << rid.slot_num);
+        LOG_WARN("Failed to undo update for RID " << rid.page_id << ":"
+                                                  << rid.slot_num);
     }
-    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+    page->WUnlatch();
+    buffer_pool_manager_->UnpinPage(rid.page_id, updated);
 }
 void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
     RID rid = log_record->GetRID();
@@ -7052,15 +7118,21 @@ void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
         LOG_WARN("Cannot fetch page " << rid.page_id << " for undo delete");
         return;
     }
+    page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
     Tuple old_tuple = log_record->GetOldTuple();
     RID new_rid;
-    if (table_page->InsertTuple(old_tuple, &new_rid)) {
-        LOG_DEBUG("Undo delete completed (re-inserted) for RID " << rid.page_id << ":" << rid.slot_num);
+    bool inserted = table_page->InsertTuple(old_tuple, &new_rid);
+    if (inserted) {
+        page->SetDirty(true);
+        LOG_DEBUG("Undo delete: re-inserted tuple at RID "
+                  << new_rid.page_id << ":" << new_rid.slot_num);
     } else {
-        LOG_WARN("Failed to undo delete for RID " << rid.page_id << ":" << rid.slot_num);
+        LOG_WARN("Failed to undo delete for RID " << rid.page_id << ":"
+                                                  << rid.slot_num);
     }
-    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+    page->WUnlatch();
+    buffer_pool_manager_->UnpinPage(rid.page_id, inserted);
 }
 }
 
@@ -8965,6 +9037,7 @@ class Parser {
     std::unique_ptr<Statement> ParseStatement();
     std::unique_ptr<Statement> ParseSelectStatement();
     std::unique_ptr<Statement> ParseCreateTableStatement();
+    std::unique_ptr<Statement> ParseDropTableStatement();
     std::unique_ptr<Statement> ParseInsertStatement();
     std::unique_ptr<Expression> ParseExpression();
     std::unique_ptr<Expression> ParsePrimaryExpression();
@@ -8982,6 +9055,7 @@ class Parser {
     std::unique_ptr<Statement> ParseRollbackStatement();
     std::unique_ptr<Statement> ParseExplainStatement();
     std::unique_ptr<Statement> ParseCreateIndexStatement();
+    std::unique_ptr<Statement> ParseDropIndexStatement();
     std::vector<Column> ParseColumnDefinitions();
     TypeId ParseDataType();
 };

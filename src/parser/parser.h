@@ -32,6 +32,7 @@ class Parser {
     std::unique_ptr<Statement> ParseStatement();
     std::unique_ptr<Statement> ParseSelectStatement();
     std::unique_ptr<Statement> ParseCreateTableStatement();
+    std::unique_ptr<Statement> ParseDropTableStatement();
     std::unique_ptr<Statement> ParseInsertStatement();
 
     // Expression parsers
@@ -55,6 +56,7 @@ class Parser {
     std::unique_ptr<Statement> ParseExplainStatement();
 
     std::unique_ptr<Statement> ParseCreateIndexStatement();
+    std::unique_ptr<Statement> ParseDropIndexStatement();
 
     // Helper functions
     std::vector<Column> ParseColumnDefinitions();

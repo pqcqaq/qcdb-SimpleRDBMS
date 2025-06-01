@@ -642,6 +642,16 @@ std::unique_ptr<Statement> Parser::ParseStatement() {
                 throw Exception("Expected TABLE or INDEX after CREATE");
             }
         }
+        case TokenType::DROP: {
+            Advance();
+            if (current_token_.type == TokenType::TABLE) {
+                return ParseDropTableStatement();
+            } else if (current_token_.type == TokenType::INDEX) {
+                return ParseDropIndexStatement();
+            } else {
+                throw Exception("Expected TABLE or INDEX after DROP");
+            }
+        }
         case TokenType::INSERT:
             return ParseInsertStatement();
         case TokenType::UPDATE:
@@ -796,6 +806,38 @@ std::unique_ptr<Expression> Parser::ParsePrimaryExpression() {
     throw Exception("Expected expression");
 }
 
+std::unique_ptr<Statement> Parser::ParseDropTableStatement() {
+    Expect(TokenType::TABLE);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected table name");
+    }
+    std::string table_name = current_token_.value;
+    Advance();
+    return std::make_unique<DropTableStatement>(table_name);
+}
+
+std::unique_ptr<Statement> Parser::ParseDropIndexStatement() {
+    Expect(TokenType::INDEX);
+    if (current_token_.type != TokenType::IDENTIFIER) {
+        throw Exception("Expected index name");
+    }
+    std::string index_name = current_token_.value;
+    Advance();
+    
+    // 可选的 ON table_name 部分
+    if (Match(TokenType::ON)) {
+        if (current_token_.type != TokenType::IDENTIFIER) {
+            throw Exception("Expected table name after ON");
+        }
+        // 解析表名但不使用（因为索引名在数据库中是唯一的）
+        std::string table_name = current_token_.value;
+        Advance();
+        LOG_DEBUG("ParseDropIndexStatement: Parsed table name " << table_name << " but ignoring it");
+    }
+    
+    return std::make_unique<DropIndexStatement>(index_name);
+}
+
 std::unique_ptr<Statement> Parser::ParseShowTablesStatement() {
     Expect(TokenType::SHOW);
     Expect(TokenType::TABLES);
@@ -831,23 +873,23 @@ std::unique_ptr<Statement> Parser::ParseExplainStatement() {
 
 std::unique_ptr<Statement> Parser::ParseCreateIndexStatement() {
     Expect(TokenType::INDEX);
-    
+
     if (current_token_.type != TokenType::IDENTIFIER) {
         throw Exception("Expected index name");
     }
     std::string index_name = current_token_.value;
     Advance();
-    
+
     Expect(TokenType::ON);
-    
+
     if (current_token_.type != TokenType::IDENTIFIER) {
         throw Exception("Expected table name");
     }
     std::string table_name = current_token_.value;
     Advance();
-    
+
     Expect(TokenType::LPAREN);
-    
+
     std::vector<std::string> key_columns;
     do {
         if (current_token_.type != TokenType::IDENTIFIER) {
@@ -856,10 +898,11 @@ std::unique_ptr<Statement> Parser::ParseCreateIndexStatement() {
         key_columns.push_back(current_token_.value);
         Advance();
     } while (Match(TokenType::COMMA));
-    
+
     Expect(TokenType::RPAREN);
-    
-    return std::make_unique<CreateIndexStatement>(index_name, table_name, key_columns);
+
+    return std::make_unique<CreateIndexStatement>(index_name, table_name,
+                                                  key_columns);
 }
 
 void ShowTablesStatement::Accept(ASTVisitor* visitor) { visitor->Visit(this); }
