@@ -20,7 +20,7 @@ class DeletePlanNode;
 class ExecutionEngine {
    public:
     ExecutionEngine(BufferPoolManager* buffer_pool_manager, Catalog* catalog,
-                    TransactionManager* txn_manager);
+                    TransactionManager* txn_manager, LogManager* log_manager = nullptr);
 
     // Execute a statement
     bool Execute(Statement* statement, std::vector<Tuple>* result_set,
@@ -30,7 +30,8 @@ class ExecutionEngine {
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
     TransactionManager* txn_manager_;
-    std::unique_ptr<TableManager> table_manager_;  // 添加 TableManager
+    LogManager* log_manager_;
+    std::unique_ptr<TableManager> table_manager_; 
 
     std::string SelectBestIndex(const std::string& table_name,
                                 Expression* where_clause);

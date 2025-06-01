@@ -55,6 +55,9 @@ private:
     
     // Logging flag
     bool enable_logging_{true};
+
+    // 当前日志页面ID
+    page_id_t current_log_page_id_{0};
     
     // Helper functions
     void FlushLogBuffer();

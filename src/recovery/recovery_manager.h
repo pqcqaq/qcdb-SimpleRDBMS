@@ -37,8 +37,9 @@ private:
     // Helper functions for ARIES
     void AnalysisPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
     void RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
-    void UndoPhase();
-    
+    void UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
+    void UndoDelete(const UpdateLogRecord* log_record);
+
     // Apply log record
     void RedoInsert(const InsertLogRecord* log_record);
     void RedoUpdate(const UpdateLogRecord* log_record);

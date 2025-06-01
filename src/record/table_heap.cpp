@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "common/exception.h"
+#include "recovery/recovery_manager.h"
 
 namespace SimpleRDBMS {
 
@@ -129,23 +130,24 @@ static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, c
 
 bool TablePage::DeleteTuple(const RID& rid) {
     auto* header = GetHeader();
-    
     if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
+        LOG_DEBUG("TablePage::DeleteTuple: Invalid slot number " << rid.slot_num);
         return false;
     }
-
+    
     const size_t header_size = sizeof(TablePageHeader);
     Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     
     if (slots[rid.slot_num].size == 0) {
-        return false; // 已经删除
+        LOG_DEBUG("TablePage::DeleteTuple: Slot " << rid.slot_num << " already empty");
+        return false;
     }
-
-    // 标记为删除
+    
+    // 标记槽位为已删除
     slots[rid.slot_num].size = 0;
     slots[rid.slot_num].offset = 0;
     
-    LOG_DEBUG("TablePage::DeleteTuple: deleted tuple at slot " << rid.slot_num);
+    LOG_DEBUG("TablePage::DeleteTuple: Successfully deleted tuple at slot " << rid.slot_num);
     return true;
 }
 
@@ -369,28 +371,34 @@ TableHeap::~TableHeap() = default;
 
 bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
     page_id_t current_page_id = first_page_id_;
-    (void)txn_id;
     
     while (current_page_id != INVALID_PAGE_ID) {
         Page* page = buffer_pool_manager_->FetchPage(current_page_id);
         if (page == nullptr) {
             return false;
         }
+        
         page->WLatch();
         auto* table_page = reinterpret_cast<TablePage*>(page);
         
-        // 尝试在当前页面插入
         if (table_page->InsertTuple(tuple, rid)) {
-            page->SetLSN(0);
+            // 记录INSERT日志
+            if (log_manager_ && txn_id != INVALID_TXN_ID) {
+                InsertLogRecord log_record(txn_id, INVALID_LSN, *rid, tuple);
+                lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+                page->SetLSN(lsn);
+            } else {
+                page->SetLSN(0);
+            }
+            
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             return true;
         }
         
-        // 当前页面空间不足，检查是否有下一个页面
         page_id_t next_page_id = table_page->GetNextPageId();
         if (next_page_id == INVALID_PAGE_ID) {
-            // 没有下一个页面，创建新页面
+            // 创建新页面的逻辑保持不变
             page_id_t new_page_id;
             Page* new_page = buffer_pool_manager_->NewPage(&new_page_id);
             if (new_page == nullptr) {
@@ -399,39 +407,38 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
                 return false;
             }
             
-            // 初始化新页面
             new_page->WLatch();
             auto* new_table_page = reinterpret_cast<TablePage*>(new_page);
             new_table_page->Init(new_page_id, current_page_id);
-            
-            // 链接到新页面
             table_page->SetNextPageId(new_page_id);
+            
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             
-            // 直接在新页面上尝试插入
             if (new_table_page->InsertTuple(tuple, rid)) {
-                new_page->SetLSN(0);
+                // 记录INSERT日志
+                if (log_manager_ && txn_id != INVALID_TXN_ID) {
+                    InsertLogRecord log_record(txn_id, INVALID_LSN, *rid, tuple);
+                    lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+                    new_page->SetLSN(lsn);
+                } else {
+                    new_page->SetLSN(0);
+                }
+                
                 new_page->WUnlatch();
                 buffer_pool_manager_->UnpinPage(new_page_id, true);
                 return true;
             } else {
-                // 即使在空页面上也无法插入，说明记录太大
-                LOG_ERROR("TableHeap::InsertTuple: Tuple too large to fit in empty page. "
-                         << "Tuple size: " << tuple.GetSerializedSize() 
-                         << ", Page size: " << PAGE_SIZE);
                 new_page->WUnlatch();
                 buffer_pool_manager_->UnpinPage(new_page_id, true);
                 return false;
             }
         } else {
-            // 有下一个页面，移动到下一个页面
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, false);
             current_page_id = next_page_id;
         }
     }
-    
     return false;
 }
 
@@ -496,38 +503,71 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
 
 bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    (void)txn_id;  // Unused parameter
-
     if (page == nullptr) {
         return false;
     }
-
+    
     page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
-    bool result = table_page->DeleteTuple(rid);
-    if (result) {
-        page->SetLSN(0);
+    
+    // 先获取要删除的记录（用于日志记录）
+    Tuple deleted_tuple;
+    bool got_tuple = false;
+    if (log_manager_ && txn_id != INVALID_TXN_ID) {
+        got_tuple = table_page->GetTuple(rid, &deleted_tuple, schema_);
     }
+    
+    // 执行删除
+    bool result = table_page->DeleteTuple(rid);
+    
+    if (result) {
+        // 记录删除操作到日志
+        if (log_manager_ && txn_id != INVALID_TXN_ID && got_tuple) {
+            // 使用UpdateLogRecord来记录删除操作（old_tuple存在，new_tuple为空）
+            Tuple empty_tuple;
+            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, deleted_tuple, empty_tuple);
+            lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+            page->SetLSN(lsn);
+        } else {
+            page->SetLSN(0);
+        }
+        page->SetDirty(true);
+    }
+    
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
     return result;
 }
 
-bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid,
-                            txn_id_t txn_id) {
+bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id) {
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    (void)txn_id;  // Unused parameter
-
     if (page == nullptr) {
         return false;
     }
-
+    
     page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
-    bool result = table_page->UpdateTuple(tuple, rid);
-    if (result) {
-        page->SetLSN(0);
+    
+    // 先获取旧的tuple用于日志记录
+    Tuple old_tuple;
+    bool got_old_tuple = false;
+    if (log_manager_ && txn_id != INVALID_TXN_ID) {
+        got_old_tuple = table_page->GetTuple(rid, &old_tuple, schema_);
     }
+    
+    bool result = table_page->UpdateTuple(tuple, rid);
+    
+    if (result) {
+        // 记录UPDATE日志
+        if (log_manager_ && txn_id != INVALID_TXN_ID && got_old_tuple) {
+            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, old_tuple, tuple);
+            lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+            page->SetLSN(lsn);
+        } else {
+            page->SetLSN(0);
+        }
+    }
+    
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
     return result;

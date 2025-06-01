@@ -24,34 +24,33 @@ using namespace SimpleRDBMS;
 class SimpleRDBMSServer {
    public:
     SimpleRDBMSServer(const std::string& db_file) {
-        // Initialize components
         disk_manager_ = std::make_unique<DiskManager>(db_file);
         log_disk_manager_ = std::make_unique<DiskManager>(db_file + ".log");
-        // Create replacer and buffer pool
         replacer_ = std::make_unique<LRUReplacer>(BUFFER_POOL_SIZE);
         buffer_pool_manager_ = std::make_unique<BufferPoolManager>(
             BUFFER_POOL_SIZE, std::move(disk_manager_), std::move(replacer_));
-        // Create log manager
+
         log_manager_ = std::make_unique<LogManager>(log_disk_manager_.get());
-        // Create lock manager
         lock_manager_ = std::make_unique<LockManager>();
-        // Create transaction manager
         transaction_manager_ = std::make_unique<TransactionManager>(
             lock_manager_.get(), log_manager_.get());
-        // Create catalog
-        catalog_ = std::make_unique<Catalog>(buffer_pool_manager_.get());
-        // Create table manager
+
+        // 重要：传递log_manager_给catalog
+        catalog_ = std::make_unique<Catalog>(buffer_pool_manager_.get(),
+                                             log_manager_.get());
+
         table_manager_ = std::make_unique<TableManager>(
             buffer_pool_manager_.get(), catalog_.get());
-        // Create recovery manager
+
         recovery_manager_ = std::make_unique<RecoveryManager>(
             buffer_pool_manager_.get(), catalog_.get(), log_manager_.get(),
             lock_manager_.get());
-        // Create execution engine
+
+        // 重要：传递log_manager_给execution_engine
         execution_engine_ = std::make_unique<ExecutionEngine>(
             buffer_pool_manager_.get(), catalog_.get(),
-            transaction_manager_.get());
-        // Perform recovery if needed
+            transaction_manager_.get(), log_manager_.get());
+
         recovery_manager_->Recover();
     }
 

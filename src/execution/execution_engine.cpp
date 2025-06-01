@@ -5,17 +5,25 @@
 #include "execution/executor.h"
 #include "execution/expression_cloner.h"
 #include "parser/ast.h"
+#include "recovery/log_manager.h"
 
 namespace SimpleRDBMS {
 
 ExecutionEngine::ExecutionEngine(BufferPoolManager* buffer_pool_manager,
                                  Catalog* catalog,
-                                 TransactionManager* txn_manager)
+                                 TransactionManager* txn_manager,
+                                 LogManager* log_manager)
     : buffer_pool_manager_(buffer_pool_manager),
       catalog_(catalog),
       txn_manager_(txn_manager),
-      table_manager_(
-          std::make_unique<TableManager>(buffer_pool_manager, catalog)) {}
+      log_manager_(log_manager),
+      table_manager_(std::make_unique<TableManager>(buffer_pool_manager, catalog)) {
+    
+    // 确保catalog有正确的log_manager
+    if (log_manager_ && catalog_) {
+        catalog_->SetLogManager(log_manager_);
+    }
+}
 
 bool ExecutionEngine::Execute(Statement* statement,
                               std::vector<Tuple>* result_set,

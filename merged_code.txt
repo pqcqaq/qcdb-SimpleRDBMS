@@ -311,8 +311,10 @@ size_t LRUReplacer::Size() const {
 
 ========== ./src/catalog/catalog.cpp ==========
 namespace SimpleRDBMS {
-Catalog::Catalog(BufferPoolManager* buffer_pool_manager)
+Catalog::Catalog(BufferPoolManager* buffer_pool_manager,
+                 LogManager* log_manager)
     : buffer_pool_manager_(buffer_pool_manager),
+      log_manager_(log_manager),
       next_table_oid_(1),
       next_index_oid_(1),
       save_in_progress_(false) {
@@ -371,6 +373,9 @@ bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     LOG_DEBUG("CreateTable: Creating TableHeap for table " << table_name);
     table_info->table_heap = std::make_unique<TableHeap>(
         buffer_pool_manager_, table_info->schema.get(), first_page_id);
+    if (log_manager_) {
+        table_info->table_heap->SetLogManager(log_manager_);
+    }
     buffer_pool_manager_->UnpinPage(first_page_id, true);
     LOG_DEBUG("CreateTable: Adding table to catalog maps");
     oid_t table_oid = table_info->table_oid;
@@ -558,6 +563,9 @@ void Catalog::LoadCatalogFromDisk() {
             table_info->table_heap = std::make_unique<TableHeap>(
                 buffer_pool_manager_, table_info->schema.get(),
                 table_info->first_page_id);
+            if (log_manager_) {
+                table_info->table_heap->SetLogManager(log_manager_);
+            }
         } catch (const std::exception& e) {
             LOG_ERROR(
                 "LoadCatalogFromDisk: Failed to create TableHeap for table "
@@ -1489,12 +1497,17 @@ bool TableManager::DropTable(const std::string& table_name) {
 namespace SimpleRDBMS {
 ExecutionEngine::ExecutionEngine(BufferPoolManager* buffer_pool_manager,
                                  Catalog* catalog,
-                                 TransactionManager* txn_manager)
+                                 TransactionManager* txn_manager,
+                                 LogManager* log_manager)
     : buffer_pool_manager_(buffer_pool_manager),
       catalog_(catalog),
       txn_manager_(txn_manager),
-      table_manager_(
-          std::make_unique<TableManager>(buffer_pool_manager, catalog)) {}
+      log_manager_(log_manager),
+      table_manager_(std::make_unique<TableManager>(buffer_pool_manager, catalog)) {
+    if (log_manager_ && catalog_) {
+        catalog_->SetLogManager(log_manager_);
+    }
+}
 bool ExecutionEngine::Execute(Statement* statement,
                               std::vector<Tuple>* result_set,
                               Transaction* txn) {
@@ -4450,7 +4463,8 @@ class SimpleRDBMSServer {
         lock_manager_ = std::make_unique<LockManager>();
         transaction_manager_ = std::make_unique<TransactionManager>(
             lock_manager_.get(), log_manager_.get());
-        catalog_ = std::make_unique<Catalog>(buffer_pool_manager_.get());
+        catalog_ = std::make_unique<Catalog>(buffer_pool_manager_.get(),
+                                             log_manager_.get());
         table_manager_ = std::make_unique<TableManager>(
             buffer_pool_manager_.get(), catalog_.get());
         recovery_manager_ = std::make_unique<RecoveryManager>(
@@ -4458,7 +4472,7 @@ class SimpleRDBMSServer {
             lock_manager_.get());
         execution_engine_ = std::make_unique<ExecutionEngine>(
             buffer_pool_manager_.get(), catalog_.get(),
-            transaction_manager_.get());
+            transaction_manager_.get(), log_manager_.get());
         recovery_manager_->Recover();
     }
     void Run() {
@@ -5996,7 +6010,6 @@ TableHeap::TableHeap(BufferPoolManager* buffer_pool_manager,
 TableHeap::~TableHeap() = default;
 bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
     page_id_t current_page_id = first_page_id_;
-    (void)txn_id;
     while (current_page_id != INVALID_PAGE_ID) {
         Page* page = buffer_pool_manager_->FetchPage(current_page_id);
         if (page == nullptr) {
@@ -6005,7 +6018,13 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
         page->WLatch();
         auto* table_page = reinterpret_cast<TablePage*>(page);
         if (table_page->InsertTuple(tuple, rid)) {
-            page->SetLSN(0);
+            if (log_manager_ && txn_id != INVALID_TXN_ID) {
+                InsertLogRecord log_record(txn_id, INVALID_LSN, *rid, tuple);
+                lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+                page->SetLSN(lsn);
+            } else {
+                page->SetLSN(0);
+            }
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             return true;
@@ -6026,14 +6045,17 @@ bool TableHeap::InsertTuple(const Tuple& tuple, RID* rid, txn_id_t txn_id) {
             page->WUnlatch();
             buffer_pool_manager_->UnpinPage(current_page_id, true);
             if (new_table_page->InsertTuple(tuple, rid)) {
-                new_page->SetLSN(0);
+                if (log_manager_ && txn_id != INVALID_TXN_ID) {
+                    InsertLogRecord log_record(txn_id, INVALID_LSN, *rid, tuple);
+                    lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+                    new_page->SetLSN(lsn);
+                } else {
+                    new_page->SetLSN(0);
+                }
                 new_page->WUnlatch();
                 buffer_pool_manager_->UnpinPage(new_page_id, true);
                 return true;
             } else {
-                LOG_ERROR("TableHeap::InsertTuple: Tuple too large to fit in empty page. "
-                         << "Tuple size: " << tuple.GetSerializedSize() 
-                         << ", Page size: " << PAGE_SIZE);
                 new_page->WUnlatch();
                 buffer_pool_manager_->UnpinPage(new_page_id, true);
                 return false;
@@ -6089,32 +6111,52 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
 }
 bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    (void)txn_id;
     if (page == nullptr) {
         return false;
     }
     page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
+    Tuple deleted_tuple;
+    bool got_tuple = false;
+    if (log_manager_ && txn_id != INVALID_TXN_ID) {
+        got_tuple = table_page->GetTuple(rid, &deleted_tuple, schema_);
+    }
     bool result = table_page->DeleteTuple(rid);
     if (result) {
-        page->SetLSN(0);
+        if (log_manager_ && txn_id != INVALID_TXN_ID && got_tuple) {
+            Tuple empty_tuple;
+            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, deleted_tuple, empty_tuple);
+            lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+            page->SetLSN(lsn);
+        } else {
+            page->SetLSN(0);
+        }
     }
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
     return result;
 }
-bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid,
-                            txn_id_t txn_id) {
+bool TableHeap::UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id) {
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
-    (void)txn_id;
     if (page == nullptr) {
         return false;
     }
     page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(page);
+    Tuple old_tuple;
+    bool got_old_tuple = false;
+    if (log_manager_ && txn_id != INVALID_TXN_ID) {
+        got_old_tuple = table_page->GetTuple(rid, &old_tuple, schema_);
+    }
     bool result = table_page->UpdateTuple(tuple, rid);
     if (result) {
-        page->SetLSN(0);
+        if (log_manager_ && txn_id != INVALID_TXN_ID && got_old_tuple) {
+            UpdateLogRecord log_record(txn_id, INVALID_LSN, rid, old_tuple, tuple);
+            lsn_t lsn = log_manager_->AppendLogRecord(&log_record);
+            page->SetLSN(lsn);
+        } else {
+            page->SetLSN(0);
+        }
     }
     page->WUnlatch();
     buffer_pool_manager_->UnpinPage(rid.page_id, result);
@@ -6558,8 +6600,9 @@ Value Tuple::GetValue(size_t index) const {
 namespace SimpleRDBMS {
 LogManager::LogManager(DiskManager* disk_manager)
     : disk_manager_(disk_manager),
-      log_buffer_size_(PAGE_SIZE * 4),
-      log_buffer_offset_(0) {
+      log_buffer_size_(PAGE_SIZE),
+      log_buffer_offset_(0),
+      current_log_page_id_(0) {
     if (disk_manager_ == nullptr) {
         throw std::invalid_argument("DiskManager cannot be null");
     }
@@ -6568,15 +6611,20 @@ LogManager::LogManager(DiskManager* disk_manager)
     next_lsn_.store(1);
     persistent_lsn_.store(0);
     flush_thread_running_ = false;
+    LOG_DEBUG("LogManager initialized with buffer size: " << log_buffer_size_);
 }
 LogManager::~LogManager() {
-    if (log_buffer_offset_ > 0) {
-        try {
+    try {
+        if (log_buffer_offset_ > 0) {
             FlushLogBuffer();
-        } catch (...) {
         }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception in LogManager destructor: " << e.what());
+    } catch (...) {
+        LOG_ERROR("Unknown exception in LogManager destructor");
     }
     delete[] log_buffer_;
+    LOG_DEBUG("LogManager destroyed");
 }
 lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
     if (!enable_logging_ || log_record == nullptr) {
@@ -6584,37 +6632,71 @@ lsn_t LogManager::AppendLogRecord(LogRecord* log_record) {
     }
     std::unique_lock<std::mutex> lock(latch_);
     lsn_t lsn = next_lsn_.fetch_add(1);
-    size_t base_record_size = sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t);
-    size_t total_size = sizeof(size_t) + base_record_size;
-    if (log_buffer_offset_ + total_size > log_buffer_size_) {
-        log_buffer_offset_ = 0;
+    size_t header_size = sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t);
+    size_t record_data_size = log_record->GetLogRecordSize();
+    size_t total_record_size = header_size + record_data_size;
+    size_t total_size_with_length = sizeof(uint32_t) + total_record_size;
+    LOG_DEBUG("Appending log record: LSN=" << lsn 
+              << ", type=" << static_cast<int>(log_record->GetType())
+              << ", total_size=" << total_size_with_length);
+    if (log_buffer_offset_ + total_size_with_length > log_buffer_size_) {
+        LOG_DEBUG("Log buffer full, flushing before append");
+        FlushLogBuffer();
     }
     char* buffer_ptr = log_buffer_ + log_buffer_offset_;
-    *reinterpret_cast<size_t*>(buffer_ptr) = base_record_size;
-    buffer_ptr += sizeof(size_t);
+    *reinterpret_cast<uint32_t*>(buffer_ptr) = static_cast<uint32_t>(total_record_size);
+    buffer_ptr += sizeof(uint32_t);
     *reinterpret_cast<LogRecordType*>(buffer_ptr) = log_record->GetType();
     buffer_ptr += sizeof(LogRecordType);
     *reinterpret_cast<txn_id_t*>(buffer_ptr) = log_record->GetTxnId();
     buffer_ptr += sizeof(txn_id_t);
     *reinterpret_cast<lsn_t*>(buffer_ptr) = log_record->GetPrevLSN();
-    log_buffer_offset_ += total_size;
+    buffer_ptr += sizeof(lsn_t);
+    if (record_data_size > 0) {
+        log_record->SerializeTo(buffer_ptr);
+    }
+    log_buffer_offset_ += total_size_with_length;
+    LOG_DEBUG("Log record appended successfully, buffer offset now: " << log_buffer_offset_);
     return lsn;
 }
 void LogManager::Flush(lsn_t lsn) {
     std::unique_lock<std::mutex> lock(latch_);
     if (log_buffer_offset_ == 0) {
+        LOG_DEBUG("Log buffer empty, nothing to flush");
         return;
     }
-    if (lsn != -1) {
-        persistent_lsn_.store(lsn);
-    } else {
-        persistent_lsn_.store(next_lsn_.load() - 1);
+    LOG_DEBUG("Flushing log buffer to disk, buffer size: " << log_buffer_offset_);
+    try {
+        FlushLogBuffer();
+        if (lsn != -1) {
+            persistent_lsn_.store(lsn);
+        } else {
+            persistent_lsn_.store(next_lsn_.load() - 1);
+        }
+        LOG_DEBUG("Log flush completed, persistent LSN: " << persistent_lsn_.load());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception during log flush: " << e.what());
+        throw;
     }
 }
 void LogManager::FlushLogBuffer() {
-    if (log_buffer_offset_ > 0) {
-        persistent_lsn_.store(next_lsn_.load());
+    if (log_buffer_offset_ == 0) {
+        return;
+    }
+    try {
+        page_id_t log_page_id = disk_manager_->AllocatePage();
+        char page_buffer[PAGE_SIZE];
+        memset(page_buffer, 0, PAGE_SIZE);
+        memcpy(page_buffer, log_buffer_, log_buffer_offset_);
+        disk_manager_->WritePage(log_page_id, page_buffer);
+        LOG_DEBUG("Log buffer flushed to page " << log_page_id 
+                  << ", bytes written: " << log_buffer_offset_);
         log_buffer_offset_ = 0;
+        memset(log_buffer_, 0, log_buffer_size_);
+        current_log_page_id_ = log_page_id;
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to flush log buffer: " << e.what());
+        throw;
     }
 }
 void LogManager::BackgroundFlush() {
@@ -6622,58 +6704,90 @@ void LogManager::BackgroundFlush() {
 std::vector<std::unique_ptr<LogRecord>> LogManager::ReadLogRecords() {
     std::unique_lock<std::mutex> lock(latch_);
     std::vector<std::unique_ptr<LogRecord>> log_records;
-    if (persistent_lsn_.load() < 0 || log_buffer_offset_ == 0) {
+    if (persistent_lsn_.load() <= 0) {
+        LOG_DEBUG("No persistent log records to read");
         return log_records;
     }
-    size_t offset = 0;
-    while (offset < log_buffer_offset_) {
-        if (offset + sizeof(size_t) > log_buffer_offset_) {
-            break;
+    try {
+        if (current_log_page_id_ >= 0) {
+            char page_buffer[PAGE_SIZE];
+            disk_manager_->ReadPage(current_log_page_id_, page_buffer);
+            size_t offset = 0;
+            while (offset < PAGE_SIZE) {
+                if (offset + sizeof(uint32_t) > PAGE_SIZE) {
+                    break;
+                }
+                uint32_t record_size = *reinterpret_cast<uint32_t*>(page_buffer + offset);
+                if (record_size == 0 || offset + sizeof(uint32_t) + record_size > PAGE_SIZE) {
+                    break;
+                }
+                offset += sizeof(uint32_t);
+                LogRecordType type = *reinterpret_cast<LogRecordType*>(page_buffer + offset);
+                offset += sizeof(LogRecordType);
+                txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(page_buffer + offset);
+                offset += sizeof(txn_id_t);
+                lsn_t prev_lsn = *reinterpret_cast<lsn_t*>(page_buffer + offset);
+                offset += sizeof(lsn_t);
+                std::unique_ptr<LogRecord> record;
+                switch (type) {
+                    case LogRecordType::BEGIN:
+                        record = std::make_unique<BeginLogRecord>(txn_id);
+                        break;
+                    case LogRecordType::COMMIT:
+                        record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
+                        break;
+                    case LogRecordType::ABORT:
+                        record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
+                        break;
+                    default:
+                        size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                        offset += remaining_size;
+                        continue;
+                }
+                if (record) {
+                    log_records.push_back(std::move(record));
+                }
+            }
         }
-        size_t record_size = *reinterpret_cast<size_t*>(log_buffer_ + offset);
-        if (record_size == 0 || record_size > log_buffer_size_ || 
-            offset + record_size > log_buffer_offset_) {
-            break;
-        }
-        offset += sizeof(size_t);
-        if (offset + sizeof(LogRecordType) > log_buffer_offset_) {
-            break;
-        }
-        LogRecordType type = *reinterpret_cast<LogRecordType*>(log_buffer_ + offset);
-        offset += sizeof(LogRecordType);
-        if (offset + sizeof(txn_id_t) > log_buffer_offset_) {
-            break;
-        }
-        txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(log_buffer_ + offset);
-        offset += sizeof(txn_id_t);
-        if (offset + sizeof(lsn_t) > log_buffer_offset_) {
-            break;
-        }
-        lsn_t prev_lsn = *reinterpret_cast<lsn_t*>(log_buffer_ + offset);
-        offset += sizeof(lsn_t);
-        std::unique_ptr<LogRecord> record;
-        switch (type) {
-            case LogRecordType::BEGIN:
-                record = std::make_unique<BeginLogRecord>(txn_id);
+        size_t buffer_offset = 0;
+        while (buffer_offset < log_buffer_offset_) {
+            if (buffer_offset + sizeof(uint32_t) > log_buffer_offset_) {
                 break;
-            case LogRecordType::COMMIT:
-                record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
+            }
+            uint32_t record_size = *reinterpret_cast<uint32_t*>(log_buffer_ + buffer_offset);
+            if (record_size == 0 || buffer_offset + sizeof(uint32_t) + record_size > log_buffer_offset_) {
                 break;
-            case LogRecordType::ABORT:
-                record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
-                break;
-            default:
-                size_t remaining_bytes = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
-                offset += remaining_bytes;
-                continue;
+            }
+            buffer_offset += sizeof(uint32_t);
+            LogRecordType type = *reinterpret_cast<LogRecordType*>(log_buffer_ + buffer_offset);
+            buffer_offset += sizeof(LogRecordType);
+            txn_id_t txn_id = *reinterpret_cast<txn_id_t*>(log_buffer_ + buffer_offset);
+            buffer_offset += sizeof(txn_id_t);
+            lsn_t prev_lsn = *reinterpret_cast<lsn_t*>(log_buffer_ + buffer_offset);
+            buffer_offset += sizeof(lsn_t);
+            std::unique_ptr<LogRecord> record;
+            switch (type) {
+                case LogRecordType::BEGIN:
+                    record = std::make_unique<BeginLogRecord>(txn_id);
+                    break;
+                case LogRecordType::COMMIT:
+                    record = std::make_unique<CommitLogRecord>(txn_id, prev_lsn);
+                    break;
+                case LogRecordType::ABORT:
+                    record = std::make_unique<AbortLogRecord>(txn_id, prev_lsn);
+                    break;
+                default:
+                    size_t remaining_size = record_size - sizeof(LogRecordType) - sizeof(txn_id_t) - sizeof(lsn_t);
+                    buffer_offset += remaining_size;
+                    continue;
+            }
+            if (record) {
+                log_records.push_back(std::move(record));
+            }
         }
-        if (record) {
-            log_records.push_back(std::move(record));
-        }
-        size_t processed_bytes = sizeof(LogRecordType) + sizeof(txn_id_t) + sizeof(lsn_t);
-        if (record_size > processed_bytes) {
-            offset += (record_size - processed_bytes);
-        }
+        LOG_DEBUG("Read " << log_records.size() << " log records");
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception reading log records: " << e.what());
     }
     return log_records;
 }
@@ -6743,40 +6857,58 @@ RecoveryManager::RecoveryManager(BufferPoolManager* buffer_pool_manager,
       lock_manager_(lock_manager) {
 }
 void RecoveryManager::Recover() {
+    LOG_INFO("Starting recovery process");
     auto log_records = log_manager_->ReadLogRecords();
     if (log_records.empty()) {
+        LOG_INFO("No log records found, recovery complete");
         return;
     }
+    LOG_INFO("Found " << log_records.size() << " log records for recovery");
     AnalysisPhase(log_records);
     RedoPhase(log_records);
-    UndoPhase();
+    UndoPhase(log_records);
+    LOG_INFO("Recovery process completed");
 }
 void RecoveryManager::Checkpoint() {
     buffer_pool_manager_->FlushAllPages();
     log_manager_->Flush();
 }
 void RecoveryManager::AnalysisPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+    LOG_DEBUG("Starting analysis phase");
+    active_txn_table_.clear();
     for (const auto& log_record : log_records) {
         txn_id_t txn_id = log_record->GetTxnId();
         switch (log_record->GetType()) {
             case LogRecordType::BEGIN:
                 active_txn_table_[txn_id] = log_record->GetPrevLSN();
+                LOG_DEBUG("Analysis: Transaction " << txn_id << " began");
                 break;
             case LogRecordType::COMMIT:
+                active_txn_table_.erase(txn_id);
+                LOG_DEBUG("Analysis: Transaction " << txn_id << " committed");
+                break;
             case LogRecordType::ABORT:
                 active_txn_table_.erase(txn_id);
+                LOG_DEBUG("Analysis: Transaction " << txn_id << " aborted");
                 break;
             case LogRecordType::INSERT:
             case LogRecordType::UPDATE:
             case LogRecordType::DELETE:
-                active_txn_table_[txn_id] = log_record->GetPrevLSN();
+                if (active_txn_table_.find(txn_id) != active_txn_table_.end()) {
+                    active_txn_table_[txn_id] = log_record->GetPrevLSN();
+                } else {
+                    active_txn_table_[txn_id] = log_record->GetPrevLSN();
+                }
+                LOG_DEBUG("Analysis: Transaction " << txn_id << " has data operation");
                 break;
             default:
                 break;
         }
     }
+    LOG_DEBUG("Analysis phase completed. Active transactions: " << active_txn_table_.size());
 }
 void RecoveryManager::RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+    LOG_DEBUG("Starting redo phase");
     for (const auto& log_record : log_records) {
         switch (log_record->GetType()) {
             case LogRecordType::INSERT:
@@ -6791,40 +6923,59 @@ void RecoveryManager::RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& l
                 break;
         }
     }
+    LOG_DEBUG("Redo phase completed");
 }
-void RecoveryManager::UndoPhase() {
-    std::vector<txn_id_t> txns_to_undo;
-    for (const auto& [txn_id, lsn] : active_txn_table_) {
-        txns_to_undo.push_back(txn_id);
-    }
-    if (txns_to_undo.empty()) {
+void RecoveryManager::UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records) {
+    LOG_DEBUG("Starting undo phase");
+    if (active_txn_table_.empty()) {
+        LOG_DEBUG("No active transactions to undo");
         return;
     }
-    while (!txns_to_undo.empty()) {
-        txn_id_t max_txn_id = INVALID_TXN_ID;
-        lsn_t max_lsn = INVALID_LSN;
-        for (txn_id_t txn_id : txns_to_undo) {
-            if (active_txn_table_[txn_id] > max_lsn) {
-                max_lsn = active_txn_table_[txn_id];
-                max_txn_id = txn_id;
+    std::vector<LogRecord*> undo_operations;
+    for (auto it = log_records.rbegin(); it != log_records.rend(); ++it) {
+        const auto& log_record = *it;
+        txn_id_t txn_id = log_record->GetTxnId();
+        if (active_txn_table_.find(txn_id) != active_txn_table_.end()) {
+            switch (log_record->GetType()) {
+                case LogRecordType::INSERT:
+                case LogRecordType::UPDATE:
+                case LogRecordType::DELETE:
+                    undo_operations.push_back(log_record.get());
+                    LOG_DEBUG("Adding operation to undo list: txn=" << txn_id 
+                             << " type=" << static_cast<int>(log_record->GetType()));
+                    break;
+                default:
+                    break;
             }
         }
-        if (max_txn_id == INVALID_TXN_ID) {
-            break;
-        }
-        active_txn_table_.erase(max_txn_id);
-        txns_to_undo.erase(
-            std::remove(txns_to_undo.begin(), txns_to_undo.end(), max_txn_id),
-            txns_to_undo.end()
-        );
-        AbortLogRecord abort_record(max_txn_id, max_lsn);
-        log_manager_->AppendLogRecord(&abort_record);
     }
+    for (LogRecord* log_record : undo_operations) {
+        switch (log_record->GetType()) {
+            case LogRecordType::INSERT:
+                UndoInsert(static_cast<InsertLogRecord*>(log_record));
+                break;
+            case LogRecordType::UPDATE:
+                UndoUpdate(static_cast<UpdateLogRecord*>(log_record));
+                break;
+            case LogRecordType::DELETE:
+                UndoDelete(static_cast<UpdateLogRecord*>(log_record));
+                break;
+            default:
+                break;
+        }
+    }
+    for (const auto& [txn_id, lsn] : active_txn_table_) {
+        AbortLogRecord abort_record(txn_id, lsn);
+        log_manager_->AppendLogRecord(&abort_record);
+        LOG_DEBUG("Added abort log record for transaction " << txn_id);
+    }
+    LOG_DEBUG("Undo phase completed. Undid " << undo_operations.size() << " operations");
 }
 void RecoveryManager::RedoInsert(const InsertLogRecord* log_record) {
     RID rid = log_record->GetRID();
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for redo insert");
         return;
     }
     if (page->GetLSN() >= log_record->GetPrevLSN()) {
@@ -6836,6 +6987,9 @@ void RecoveryManager::RedoInsert(const InsertLogRecord* log_record) {
     RID new_rid;
     if (table_page->InsertTuple(tuple, &new_rid)) {
         page->SetLSN(log_record->GetPrevLSN());
+        LOG_DEBUG("Redo insert completed for RID " << rid.page_id << ":" << rid.slot_num);
+    } else {
+        LOG_WARN("Failed to redo insert for RID " << rid.page_id << ":" << rid.slot_num);
     }
     buffer_pool_manager_->UnpinPage(rid.page_id, true);
 }
@@ -6843,6 +6997,7 @@ void RecoveryManager::RedoUpdate(const UpdateLogRecord* log_record) {
     RID rid = log_record->GetRID();
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for redo update");
         return;
     }
     if (page->GetLSN() >= log_record->GetPrevLSN()) {
@@ -6853,6 +7008,9 @@ void RecoveryManager::RedoUpdate(const UpdateLogRecord* log_record) {
     Tuple new_tuple = log_record->GetNewTuple();
     if (table_page->UpdateTuple(new_tuple, rid)) {
         page->SetLSN(log_record->GetPrevLSN());
+        LOG_DEBUG("Redo update completed for RID " << rid.page_id << ":" << rid.slot_num);
+    } else {
+        LOG_WARN("Failed to redo update for RID " << rid.page_id << ":" << rid.slot_num);
     }
     buffer_pool_manager_->UnpinPage(rid.page_id, true);
 }
@@ -6860,21 +7018,48 @@ void RecoveryManager::UndoInsert(const InsertLogRecord* log_record) {
     RID rid = log_record->GetRID();
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for undo insert");
         return;
     }
     auto* table_page = reinterpret_cast<TablePage*>(page);
-    table_page->DeleteTuple(rid);
+    if (table_page->DeleteTuple(rid)) {
+        LOG_DEBUG("Undo insert completed (deleted) for RID " << rid.page_id << ":" << rid.slot_num);
+    } else {
+        LOG_WARN("Failed to undo insert for RID " << rid.page_id << ":" << rid.slot_num);
+    }
     buffer_pool_manager_->UnpinPage(rid.page_id, true);
 }
 void RecoveryManager::UndoUpdate(const UpdateLogRecord* log_record) {
     RID rid = log_record->GetRID();
     Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
     if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for undo update");
         return;
     }
     auto* table_page = reinterpret_cast<TablePage*>(page);
     Tuple old_tuple = log_record->GetOldTuple();
-    table_page->UpdateTuple(old_tuple, rid);
+    if (table_page->UpdateTuple(old_tuple, rid)) {
+        LOG_DEBUG("Undo update completed for RID " << rid.page_id << ":" << rid.slot_num);
+    } else {
+        LOG_WARN("Failed to undo update for RID " << rid.page_id << ":" << rid.slot_num);
+    }
+    buffer_pool_manager_->UnpinPage(rid.page_id, true);
+}
+void RecoveryManager::UndoDelete(const UpdateLogRecord* log_record) {
+    RID rid = log_record->GetRID();
+    Page* page = buffer_pool_manager_->FetchPage(rid.page_id);
+    if (page == nullptr) {
+        LOG_WARN("Cannot fetch page " << rid.page_id << " for undo delete");
+        return;
+    }
+    auto* table_page = reinterpret_cast<TablePage*>(page);
+    Tuple old_tuple = log_record->GetOldTuple();
+    RID new_rid;
+    if (table_page->InsertTuple(old_tuple, &new_rid)) {
+        LOG_DEBUG("Undo delete completed (re-inserted) for RID " << rid.page_id << ":" << rid.slot_num);
+    } else {
+        LOG_WARN("Failed to undo delete for RID " << rid.page_id << ":" << rid.slot_num);
+    }
     buffer_pool_manager_->UnpinPage(rid.page_id, true);
 }
 }
@@ -7427,7 +7612,7 @@ struct IndexInfo {
 };
 class Catalog {
    public:
-    explicit Catalog(BufferPoolManager* buffer_pool_manager);
+    explicit Catalog(BufferPoolManager* buffer_pool_manager, LogManager* log_manager = nullptr);
     ~Catalog();
     bool CreateTable(const std::string& table_name, const Schema& schema);
     bool DropTable(const std::string& table_name);
@@ -7440,6 +7625,7 @@ class Catalog {
     IndexInfo* GetIndex(const std::string& index_name);
     IndexInfo* GetIndex(oid_t index_oid);
     std::vector<IndexInfo*> GetTableIndexes(const std::string& table_name);
+    void SetLogManager(LogManager* log_manager) { log_manager_ = log_manager; }
     void LoadCatalogFromDisk();
     void SaveCatalogToDisk();
     void DebugPrintTables() const;
@@ -7457,6 +7643,7 @@ class Catalog {
     BufferPoolManager* buffer_pool_manager_;
     mutable std::mutex save_mutex_;
     std::atomic<bool> save_in_progress_ = {false};
+    LogManager* log_manager_;
     std::unordered_map<std::string, std::unique_ptr<TableInfo>> tables_;
     std::unordered_map<oid_t, std::string> table_oid_map_;
     std::unordered_map<std::string, std::unique_ptr<IndexInfo>> indexes_;
@@ -7817,14 +8004,15 @@ class DeletePlanNode;
 class ExecutionEngine {
    public:
     ExecutionEngine(BufferPoolManager* buffer_pool_manager, Catalog* catalog,
-                    TransactionManager* txn_manager);
+                    TransactionManager* txn_manager, LogManager* log_manager = nullptr);
     bool Execute(Statement* statement, std::vector<Tuple>* result_set,
                  Transaction* txn);
    private:
     BufferPoolManager* buffer_pool_manager_;
     Catalog* catalog_;
     TransactionManager* txn_manager_;
-    std::unique_ptr<TableManager> table_manager_;
+    LogManager* log_manager_;
+    std::unique_ptr<TableManager> table_manager_; 
     std::string SelectBestIndex(const std::string& table_name,
                                 Expression* where_clause);
     std::unique_ptr<PlanNode> CreatePlan(Statement* statement);
@@ -8832,6 +9020,7 @@ class TableHeap {
     bool UpdateTuple(const Tuple& tuple, const RID& rid, txn_id_t txn_id);
     bool GetTuple(const RID& rid, Tuple* tuple, txn_id_t txn_id);
     page_id_t GetFirstPageId() const { return first_page_id_; }
+    void SetLogManager(LogManager* log_manager) { log_manager_ = log_manager; }
     class Iterator {
        public:
         Iterator(TableHeap* table_heap, const RID& rid);
@@ -8850,6 +9039,7 @@ class TableHeap {
     BufferPoolManager* buffer_pool_manager_;
     const Schema* schema_;
     page_id_t first_page_id_;
+    LogManager* log_manager_ = nullptr;
 };
 }
 
@@ -8897,6 +9087,7 @@ private:
     std::condition_variable flush_cv_;
     std::atomic<bool> flush_thread_running_{false};
     bool enable_logging_{true};
+    page_id_t current_log_page_id_{0};
     void FlushLogBuffer();
     void BackgroundFlush();
 };
@@ -8920,6 +9111,7 @@ public:
         : type_(type), txn_id_(txn_id), prev_lsn_(prev_lsn), size_(0) {}
     virtual ~LogRecord() = default;
     virtual void SerializeTo(char* buffer) const = 0;
+    virtual size_t GetLogRecordSize() const = 0;
     static std::unique_ptr<LogRecord> DeserializeFrom(const char* buffer);
     LogRecordType GetType() const { return type_; }
     txn_id_t GetTxnId() const { return txn_id_; }
@@ -8937,6 +9129,9 @@ public:
         : LogRecord(LogRecordType::INSERT, txn_id, prev_lsn),
           rid_(rid), tuple_(tuple) {}
     void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override {
+        return sizeof(page_id_t) + sizeof(slot_offset_t) + tuple_.GetSerializedSize();
+    }
     const RID& GetRID() const { return rid_; }
     const Tuple& GetTuple() const { return tuple_; }
 private:
@@ -8950,6 +9145,10 @@ public:
         : LogRecord(LogRecordType::UPDATE, txn_id, prev_lsn),
           rid_(rid), old_tuple_(old_tuple), new_tuple_(new_tuple) {}
     void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override {
+        return sizeof(page_id_t) + sizeof(slot_offset_t) + 
+               old_tuple_.GetSerializedSize() + new_tuple_.GetSerializedSize();
+    }
     const RID& GetRID() const { return rid_; }
     const Tuple& GetOldTuple() const { return old_tuple_; }
     const Tuple& GetNewTuple() const { return new_tuple_; }
@@ -8964,6 +9163,7 @@ public:
         : LogRecord(LogRecordType::BEGIN, txn_id, INVALID_LSN) {}
     ~BeginLogRecord() override = default;
     void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override { return 0; }
 };
 class CommitLogRecord : public LogRecord {
 public:
@@ -8971,6 +9171,7 @@ public:
         : LogRecord(LogRecordType::COMMIT, txn_id, prev_lsn) {}
     ~CommitLogRecord() override = default;
     void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override { return 0; }
 };
 class AbortLogRecord : public LogRecord {
 public:
@@ -8978,6 +9179,7 @@ public:
         : LogRecord(LogRecordType::ABORT, txn_id, prev_lsn) {}
     ~AbortLogRecord() override = default;
     void SerializeTo(char* buffer) const override;
+    size_t GetLogRecordSize() const override { return 0; }
 };
 }
 
@@ -9000,7 +9202,8 @@ private:
     std::unordered_map<page_id_t, lsn_t> dirty_page_table_;
     void AnalysisPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
     void RedoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
-    void UndoPhase();
+    void UndoPhase(const std::vector<std::unique_ptr<LogRecord>>& log_records);
+    void UndoDelete(const UpdateLogRecord* log_record);
     void RedoInsert(const InsertLogRecord* log_record);
     void RedoUpdate(const UpdateLogRecord* log_record);
     void UndoInsert(const InsertLogRecord* log_record);

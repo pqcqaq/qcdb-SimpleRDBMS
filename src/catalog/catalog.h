@@ -11,6 +11,7 @@
 #include "common/config.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "recovery/log_manager.h"
 
 // 前向声明
 namespace SimpleRDBMS {
@@ -35,7 +36,7 @@ struct IndexInfo {
 
 class Catalog {
    public:
-    explicit Catalog(BufferPoolManager* buffer_pool_manager);
+    explicit Catalog(BufferPoolManager* buffer_pool_manager, LogManager* log_manager = nullptr);
 
     ~Catalog();
 
@@ -53,6 +54,8 @@ class Catalog {
     IndexInfo* GetIndex(const std::string& index_name);
     IndexInfo* GetIndex(oid_t index_oid);
     std::vector<IndexInfo*> GetTableIndexes(const std::string& table_name);
+
+    void SetLogManager(LogManager* log_manager) { log_manager_ = log_manager; }
 
     // 持久化相关方法
     void LoadCatalogFromDisk();
@@ -77,6 +80,7 @@ class Catalog {
     BufferPoolManager* buffer_pool_manager_;
     mutable std::mutex save_mutex_;
     std::atomic<bool> save_in_progress_ = {false};
+    LogManager* log_manager_; // 日志管理器，用于恢复
 
     // Table name -> TableInfo
     std::unordered_map<std::string, std::unique_ptr<TableInfo>> tables_;

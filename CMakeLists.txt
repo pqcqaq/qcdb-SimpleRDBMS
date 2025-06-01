@@ -92,9 +92,12 @@ add_executable(simple_index_manager_test test/unit/simple_index_manager_test.cpp
 target_link_libraries(simple_index_manager_test simple_rdbms_core)
 
 # index_manager_test
-
 add_executable(index_manager_test test/unit/index_manager_test.cpp)
 target_link_libraries(index_manager_test simple_rdbms_core gtest)
+
+# test_log_recovery.cpp
+add_executable(test_log_recovery test/unit/test_log_recovery.cpp)
+target_link_libraries(test_log_recovery simple_rdbms_core gtest)
 
 # 编译标志
 target_compile_options(simple_rdbms_core PRIVATE -Wall -Wextra)

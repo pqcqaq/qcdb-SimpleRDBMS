@@ -9,18 +9,18 @@
 #include "common/debug.h"
 #include "common/exception.h"
 #include "record/table_heap.h"
+#include "recovery/log_manager.h"
 
 namespace SimpleRDBMS {
 
-Catalog::Catalog(BufferPoolManager* buffer_pool_manager)
+Catalog::Catalog(BufferPoolManager* buffer_pool_manager,
+                 LogManager* log_manager)
     : buffer_pool_manager_(buffer_pool_manager),
+      log_manager_(log_manager),
       next_table_oid_(1),
       next_index_oid_(1),
-      save_in_progress_(false) {  // 初始化原子变量
-
+      save_in_progress_(false) {
     LOG_DEBUG("Catalog: Initializing catalog");
-
-    // 从磁盘加载catalog信息
     try {
         LoadCatalogFromDisk();
         LOG_DEBUG("Catalog: Successfully loaded catalog from disk");
@@ -28,7 +28,6 @@ Catalog::Catalog(BufferPoolManager* buffer_pool_manager)
         LOG_WARN("Catalog: Failed to load catalog from disk: " << e.what());
         LOG_DEBUG("Catalog: Starting with empty catalog");
     }
-
     LOG_DEBUG("Catalog: Catalog initialization completed");
 }
 
@@ -52,21 +51,18 @@ Catalog::~Catalog() {
 
 bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     LOG_DEBUG("CreateTable: Starting to create table " << table_name);
-    // Check if table already exists
     if (tables_.find(table_name) != tables_.end()) {
         LOG_WARN("CreateTable: Table " << table_name << " already exists");
         return false;
     }
 
     LOG_DEBUG("CreateTable: Creating table info for " << table_name);
-    // Create table info
     auto table_info = std::make_unique<TableInfo>();
     table_info->table_name = table_name;
     table_info->schema = std::make_unique<Schema>(schema);
     table_info->table_oid = next_table_oid_++;
 
     LOG_DEBUG("CreateTable: Allocating first page for table " << table_name);
-    // 创建TableHeap时先分配first_page_id
     page_id_t first_page_id;
     Page* first_page = buffer_pool_manager_->NewPage(&first_page_id);
     if (first_page == nullptr) {
@@ -74,10 +70,9 @@ bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
                   << table_name);
         return false;
     }
+
     LOG_DEBUG("CreateTable: Allocated first page "
               << first_page_id << " for table " << table_name);
-
-    // 重要：需要先初始化页面！
     first_page->WLatch();
     auto* table_page = reinterpret_cast<TablePage*>(first_page);
     table_page->Init(first_page_id, INVALID_PAGE_ID);
@@ -86,28 +81,27 @@ bool Catalog::CreateTable(const std::string& table_name, const Schema& schema) {
     table_info->first_page_id = first_page_id;
 
     LOG_DEBUG("CreateTable: Creating TableHeap for table " << table_name);
-    // 使用已分配并初始化的page_id创建TableHeap
     table_info->table_heap = std::make_unique<TableHeap>(
         buffer_pool_manager_, table_info->schema.get(), first_page_id);
+
+    // 重要：设置LogManager
+    if (log_manager_) {
+        table_info->table_heap->SetLogManager(log_manager_);
+    }
 
     buffer_pool_manager_->UnpinPage(first_page_id, true);
 
     LOG_DEBUG("CreateTable: Adding table to catalog maps");
-
-    // Store table info
     oid_t table_oid = table_info->table_oid;
     tables_[table_name] = std::move(table_info);
     table_oid_map_[table_oid] = table_name;
 
     LOG_DEBUG("CreateTable: Saving catalog to disk");
-
-    // 保存到磁盘
     try {
         SaveCatalogToDisk();
         LOG_DEBUG("CreateTable: Successfully saved catalog to disk");
     } catch (const std::exception& e) {
         LOG_ERROR("CreateTable: Failed to save catalog to disk: " << e.what());
-        // 回滚操作
         tables_.erase(table_name);
         table_oid_map_.erase(table_oid);
         return false;
@@ -317,6 +311,10 @@ void Catalog::LoadCatalogFromDisk() {
             table_info->table_heap = std::make_unique<TableHeap>(
                 buffer_pool_manager_, table_info->schema.get(),
                 table_info->first_page_id);
+            // 设置LogManager
+            if (log_manager_) {
+                table_info->table_heap->SetLogManager(log_manager_);
+            }
         } catch (const std::exception& e) {
             LOG_ERROR(
                 "LoadCatalogFromDisk: Failed to create TableHeap for table "

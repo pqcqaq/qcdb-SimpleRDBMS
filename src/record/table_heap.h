@@ -5,6 +5,7 @@
 #include "buffer/buffer_pool_manager.h"
 #include "catalog/schema.h"
 #include "record/tuple.h"
+#include "recovery/log_manager.h"
 
 namespace SimpleRDBMS {
 
@@ -65,6 +66,9 @@ class TableHeap {
     bool GetTuple(const RID& rid, Tuple* tuple, txn_id_t txn_id);
 
     page_id_t GetFirstPageId() const { return first_page_id_; }
+    
+    // 设置日志管理器
+    void SetLogManager(LogManager* log_manager) { log_manager_ = log_manager; }
 
     // Iterator for sequential scan
     class Iterator {
@@ -90,6 +94,7 @@ class TableHeap {
     BufferPoolManager* buffer_pool_manager_;
     const Schema* schema_;
     page_id_t first_page_id_;
+    LogManager* log_manager_ = nullptr;  // 日志管理器，用于恢复操作
 };
 
 }  // namespace SimpleRDBMS
