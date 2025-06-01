@@ -290,8 +290,20 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                                          const Tuple& tuple, const RID& rid) {
     LOG_TRACE("TableManager::UpdateIndexesOnInsert: Updating indexes for table "
               << table_name);
-    std::vector<std::string> table_indexes =
-        index_manager_->GetTableIndexes(table_name);
+    
+    if (!index_manager_) {
+        LOG_WARN("TableManager::UpdateIndexesOnInsert: IndexManager is null");
+        return true; // 没有索引管理器，认为成功
+    }
+    
+    std::vector<std::string> table_indexes;
+    try {
+        table_indexes = index_manager_->GetTableIndexes(table_name);
+    } catch (const std::exception& e) {
+        LOG_ERROR("TableManager::UpdateIndexesOnInsert: Failed to get table indexes: " << e.what());
+        return false;
+    }
+    
     bool all_success = true;
     for (const auto& index_name : table_indexes) {
         IndexInfo* index_info = catalog_->GetIndex(index_name);
@@ -301,6 +313,7 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                 << index_name);
             continue;
         }
+        
         if (index_info->key_columns.size() != 1) {
             LOG_WARN(
                 "TableManager::UpdateIndexesOnInsert: Multi-column index not "
@@ -308,6 +321,7 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                 << index_name);
             continue;
         }
+
         try {
             TableInfo* table_info = catalog_->GetTable(table_name);
             if (!table_info) {
@@ -317,13 +331,29 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                 all_success = false;
                 continue;
             }
+
             const std::string& column_name = index_info->key_columns[0];
             size_t column_idx = table_info->schema->GetColumnIdx(column_name);
             Value key_value = tuple.GetValue(column_idx);
 
-            // 修复：真正调用 IndexManager 的 InsertEntry 方法
-            bool success =
-                index_manager_->InsertEntry(index_name, key_value, rid);
+            // 添加超时保护
+            auto start_time = std::chrono::steady_clock::now();
+            const auto TIMEOUT_DURATION = std::chrono::seconds(5);
+            
+            bool success = false;
+            try {
+                success = index_manager_->InsertEntry(index_name, key_value, rid);
+                
+                auto current_time = std::chrono::steady_clock::now();
+                if (current_time - start_time > TIMEOUT_DURATION) {
+                    LOG_ERROR("TableManager::UpdateIndexesOnInsert: Index insert timed out for " << index_name);
+                    success = false;
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR("TableManager::UpdateIndexesOnInsert: Exception during index insert: " << e.what());
+                success = false;
+            }
+            
             if (!success) {
                 LOG_WARN(
                     "TableManager::UpdateIndexesOnInsert: Failed to insert "

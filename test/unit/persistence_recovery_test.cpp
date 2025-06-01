@@ -697,7 +697,7 @@ class PersistenceRecoveryTest {
 
 int main() {
     // 设置调试级别以获得更多信息
-    setenv("SIMPLEDB_DEBUG_LEVEL", "4", 1);  // DEBUG级别
+    // setenv("SIMPLEDB_DEBUG_LEVEL", "4", 1);  // DEBUG级别
 
     try {
         PersistenceRecoveryTest test;

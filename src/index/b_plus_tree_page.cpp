@@ -126,9 +126,16 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
         return 0;
     }
     
-    // 确保不会访问越界
-    for (int i = 1; i <= size; i++) {
-        try {
+    // 添加合理性检查
+    const int MAX_REASONABLE_SIZE = (PAGE_SIZE - sizeof(BPlusTreePage)) / (sizeof(KeyType) + sizeof(page_id_t));
+    if (size > MAX_REASONABLE_SIZE) {
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Size " << size 
+                  << " exceeds reasonable limit " << MAX_REASONABLE_SIZE);
+        return 0;
+    }
+
+    try {
+        for (int i = 1; i <= size; i++) {
             if (i > GetMaxSize()) {
                 LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Index " << i 
                           << " exceeds max size " << GetMaxSize());
@@ -137,12 +144,13 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
             if (key < KeyAt(i)) {
                 return i - 1;
             }
-        } catch (const std::exception& e) {
-            LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at index " << i 
-                      << " with size " << size << ": " << e.what());
-            return 0;
         }
+    } catch (const std::exception& e) {
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at size " << size 
+                  << ": " << e.what());
+        return 0;
     }
+    
     return size;
 }
 

@@ -31,8 +31,6 @@ class TablePage : public Page {
     // Get metadata
     page_id_t GetNextPageId() const;
     void SetNextPageId(page_id_t next_page_id);
-
-   private:
     // Page header
     struct TablePageHeader {
         page_id_t next_page_id;
@@ -41,6 +39,7 @@ class TablePage : public Page {
         uint16_t free_space_offset;
     };
 
+   private:
     TablePageHeader* GetHeader();
     const TablePageHeader* GetHeader() const;
 };

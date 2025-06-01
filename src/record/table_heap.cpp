@@ -11,6 +11,9 @@ namespace SimpleRDBMS {
 struct Slot {
     uint16_t offset;
     uint16_t size;
+    
+    Slot() : offset(0), size(0) {}
+    Slot(uint16_t off, uint16_t sz) : offset(off), size(sz) {}
 };
 
 void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
@@ -18,7 +21,7 @@ void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     SetLSN(INVALID_LSN);
     (void)prev_page_id;
     
-    // Ensure the entire page is zeroed
+    // 清零整个页面数据
     std::memset(GetData(), 0, PAGE_SIZE);
     
     auto* header = GetHeader();
@@ -26,186 +29,286 @@ void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     header->lsn = INVALID_LSN;
     header->num_tuples = 0;
     header->free_space_offset = PAGE_SIZE;
+    
+    LOG_DEBUG("TablePage::Init: initialized page " << page_id
+              << " with free_space_offset=" << header->free_space_offset);
+}
 
-    LOG_DEBUG("TablePage::Init: initialized page "
-              << page_id
-              << " with free_space_offset=" << header->free_space_offset
-              << " num_tuples=" << header->num_tuples
-              << " available_space=" << (PAGE_SIZE - sizeof(TablePageHeader)));
+// 页面布局：
+// [Header] [Slot Directory] [Free Space] [Tuple Data (grows backward)]
+//    ^            ^              ^               ^
+//    0      header_size    slot_end_offset  free_space_offset
 
-    // Validation after initialization
-    if (header->free_space_offset != PAGE_SIZE || header->num_tuples != 0) {
-        LOG_ERROR("TablePage::Init: Initialization verification failed on page " << page_id << ": "
-                  << "free_space_offset=" << header->free_space_offset 
-                  << " num_tuples=" << header->num_tuples);
-        // Force correct values
-        header->free_space_offset = PAGE_SIZE;
+static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, char* page_data) {
+    const size_t header_size = sizeof(TablePage::TablePageHeader);
+    const size_t slot_size = sizeof(Slot);
+    
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: num_tuples=" << header->num_tuples 
+              << ", free_space_offset=" << header->free_space_offset);
+    
+    if (header->num_tuples < 0) {
+        LOG_ERROR("ValidateAndRepairSlotDirectory: negative num_tuples " << header->num_tuples);
         header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
     }
+    
+    if (header->num_tuples == 0) {
+        header->free_space_offset = PAGE_SIZE;
+        LOG_DEBUG("ValidateAndRepairSlotDirectory: empty page, reset free_space_offset to " << PAGE_SIZE);
+        return true;
+    }
+    
+    size_t slot_end_offset = header_size + header->num_tuples * slot_size;
+    if (slot_end_offset > PAGE_SIZE) {
+        LOG_ERROR("ValidateAndRepairSlotDirectory: slot directory exceeds page size, resetting");
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
+    
+    Slot* slots = reinterpret_cast<Slot*>(page_data + header_size);
+    size_t calculated_free_offset = PAGE_SIZE;
+    int valid_tuples = 0;
+    
+    // 验证每个槽位
+    for (int i = 0; i < header->num_tuples; i++) {
+        LOG_TRACE("ValidateAndRepairSlotDirectory: checking slot " << i 
+                  << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
+        
+        if (slots[i].size > 0) {
+            // 检查槽位有效性
+            if (slots[i].offset >= slot_end_offset && 
+                slots[i].offset < PAGE_SIZE &&
+                slots[i].size <= PAGE_SIZE &&
+                slots[i].offset + slots[i].size <= PAGE_SIZE) {
+                
+                calculated_free_offset = std::min(calculated_free_offset, static_cast<size_t>(slots[i].offset));
+                
+                // 如果需要压缩，移动槽位
+                if (valid_tuples != i) {
+                    LOG_DEBUG("ValidateAndRepairSlotDirectory: moving slot " << i << " to position " << valid_tuples);
+                    slots[valid_tuples] = slots[i];
+                }
+                valid_tuples++;
+            } else {
+                LOG_DEBUG("ValidateAndRepairSlotDirectory: removing invalid slot " << i 
+                          << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
+            }
+        }
+    }
+    
+    // 清理无效的槽位
+    for (int i = valid_tuples; i < header->num_tuples; i++) {
+        slots[i].offset = 0;
+        slots[i].size = 0;
+    }
+    
+    header->num_tuples = valid_tuples;
+    slot_end_offset = header_size + header->num_tuples * slot_size;
+    
+    // 确保 free space offset 是合理的
+    if (calculated_free_offset < slot_end_offset) {
+        calculated_free_offset = PAGE_SIZE;
+        LOG_WARN("ValidateAndRepairSlotDirectory: page appears full, no free space available");
+    }
+    
+    // 验证 free space offset 的合理性
+    if (header->free_space_offset > PAGE_SIZE || header->free_space_offset < slot_end_offset) {
+        LOG_DEBUG("ValidateAndRepairSlotDirectory: correcting invalid free_space_offset from " 
+                  << header->free_space_offset << " to " << calculated_free_offset);
+        header->free_space_offset = calculated_free_offset;
+    }
+    
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: validated page with " << valid_tuples 
+              << " valid tuples, slot_end=" << slot_end_offset 
+              << ", free_offset=" << header->free_space_offset);
+    
+    return true;
 }
 
 bool TablePage::DeleteTuple(const RID& rid) {
     auto* header = GetHeader();
-
-    if (rid.slot_num >= header->num_tuples) {
+    
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
         return false;
     }
 
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
-
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
+    
     if (slots[rid.slot_num].size == 0) {
-        return false;
+        return false; // 已经删除
     }
 
+    // 标记为删除
     slots[rid.slot_num].size = 0;
-
+    slots[rid.slot_num].offset = 0;
+    
+    LOG_DEBUG("TablePage::DeleteTuple: deleted tuple at slot " << rid.slot_num);
     return true;
 }
 
 bool TablePage::UpdateTuple(const Tuple& tuple, const RID& rid) {
     auto* header = GetHeader();
-
-    if (rid.slot_num >= header->num_tuples) {
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
         return false;
     }
-
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
-
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
         return false;
     }
-
+    
     size_t new_tuple_size = tuple.GetSerializedSize();
     size_t old_tuple_size = slots[rid.slot_num].size;
-
+    
+    // 如果大小相同，直接在原位置覆盖
     if (new_tuple_size == old_tuple_size) {
         char* tuple_data = GetData() + slots[rid.slot_num].offset;
         tuple.SerializeTo(tuple_data);
         return true;
     }
-
-    if (new_tuple_size > old_tuple_size) {
-        size_t slot_end_offset =
-            sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
-        size_t free_space = header->free_space_offset - slot_end_offset;
-        size_t extra_space_needed = new_tuple_size - old_tuple_size;
-
-        if (free_space < extra_space_needed) {
-            return false;
-        }
+    
+    // 如果新tuple更小，可以直接在原位置更新
+    if (new_tuple_size < old_tuple_size) {
+        char* tuple_data = GetData() + slots[rid.slot_num].offset;
+        tuple.SerializeTo(tuple_data);
+        slots[rid.slot_num].size = new_tuple_size;
+        return true;
     }
-
+    
+    // 如果新tuple更大，使用删除-插入的简单策略
+    // 保存原始slot信息用于回滚
+    uint16_t old_offset = slots[rid.slot_num].offset;
+    uint16_t old_size = slots[rid.slot_num].size;
+    
+    // 先标记原slot为删除状态
     slots[rid.slot_num].size = 0;
-
-    RID new_rid;
-    if (!InsertTuple(tuple, &new_rid)) {
-        slots[rid.slot_num].size = old_tuple_size;
+    slots[rid.slot_num].offset = 0;
+    
+    // 尝试在页面末尾插入新tuple
+    size_t slot_end_offset = header_size + header->num_tuples * sizeof(Slot);
+    if (header->free_space_offset >= slot_end_offset + new_tuple_size) {
+        // 有足够空间，直接插入
+        header->free_space_offset -= new_tuple_size;
+        char* new_tuple_data = GetData() + header->free_space_offset;
+        tuple.SerializeTo(new_tuple_data);
+        
+        // 更新原slot信息指向新位置
+        slots[rid.slot_num].offset = header->free_space_offset;
+        slots[rid.slot_num].size = new_tuple_size;
+        
+        return true;
+    } else {
+        // 空间不足，恢复原状态
+        slots[rid.slot_num].offset = old_offset;
+        slots[rid.slot_num].size = old_size;
         return false;
     }
-
-    slots[rid.slot_num] = slots[new_rid.slot_num];
-    header->num_tuples--;
-
-    return true;
 }
 
 bool TablePage::GetTuple(const RID& rid, Tuple* tuple, const Schema* schema) {
+    if (!tuple || !schema) {
+        LOG_ERROR("TablePage::GetTuple: null tuple or schema pointer");
+        return false;
+    }
+    
     auto* header = GetHeader();
-
-    if (rid.slot_num >= header->num_tuples) {
+    if (!header) {
+        LOG_ERROR("TablePage::GetTuple: null header");
         return false;
     }
-
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
-
+    
+    LOG_DEBUG("TablePage::GetTuple: Attempting to get tuple from slot " 
+              << rid.slot_num << " (total slots: " << header->num_tuples << ")");
+    
+    // Validate slot number
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
+        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
+                  << " out of range [0, " << header->num_tuples << ")");
+        return false;
+    }
+    
+    // Validate and repair page structure if needed
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::GetTuple: page structure validation failed");
+        return false;
+    }
+    
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
+    
+    // Check if slot is valid (not deleted)
     if (slots[rid.slot_num].size == 0) {
+        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num << " is deleted (size=0)");
         return false;
     }
-
+    
+    LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
+              << " has offset=" << slots[rid.slot_num].offset 
+              << ", size=" << slots[rid.slot_num].size);
+    
+    // Validate slot offset and size
+    if (slots[rid.slot_num].offset < header_size || 
+        slots[rid.slot_num].offset + slots[rid.slot_num].size > PAGE_SIZE) {
+        LOG_WARN("TablePage::GetTuple: invalid slot " << rid.slot_num 
+                 << " (offset=" << slots[rid.slot_num].offset 
+                 << ", size=" << slots[rid.slot_num].size << ")");
+        return false;
+    }
+    
+    // Get tuple data and deserialize
     char* tuple_data = GetData() + slots[rid.slot_num].offset;
-    tuple->DeserializeFrom(tuple_data, schema);
-    tuple->SetRID(rid);
-
-    return true;
+    
+    try {
+        LOG_DEBUG("TablePage::GetTuple: About to deserialize tuple data, schema has " 
+                  << schema->GetColumnCount() << " columns");
+        
+        tuple->DeserializeFrom(tuple_data, schema);
+        tuple->SetRID(rid);
+        
+        LOG_DEBUG("TablePage::GetTuple: Successfully retrieved tuple from slot " 
+                  << rid.slot_num << " with " << tuple->GetValues().size() << " values");
+        
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("TablePage::GetTuple: Failed to deserialize tuple from slot " 
+                  << rid.slot_num << ": " << e.what());
+        return false;
+    }
 }
 
 bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     auto* header = GetHeader();
     
-    // Enhanced corruption detection and recovery
-    const size_t page_header_size = sizeof(TablePageHeader);
-    const size_t min_record_size = 16;
-    const size_t slot_size = sizeof(Slot);
-    const int max_reasonable_tuples = static_cast<int>(
-        (PAGE_SIZE - page_header_size) / (min_record_size + slot_size));
-    
-    // Check for corruption first
-    if (header->num_tuples < 0) {
-        LOG_ERROR("TablePage::GetNextTupleRID: Invalid num_tuples (negative): " 
-                  << header->num_tuples << " on page " << GetPageId());
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
-        return false;
-    }
-    
-    if (header->num_tuples > max_reasonable_tuples) {
-        LOG_ERROR("TablePage::GetNextTupleRID: num_tuples ("
-                  << header->num_tuples << ") exceeds reasonable limit ("
-                  << max_reasonable_tuples << ") on page " << GetPageId() 
-                  << ", resetting page.");
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
-        return false;
-    }
-    
-    if (header->free_space_offset > PAGE_SIZE ||
-        header->free_space_offset < sizeof(TablePageHeader)) {
-        LOG_ERROR("TablePage::GetNextTupleRID: invalid free_space_offset="
-                  << header->free_space_offset << " on page " << GetPageId()
-                  << " (should be between " << sizeof(TablePageHeader) 
-                  << " and " << PAGE_SIZE << "), resetting page.");
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
+    // 验证和修复页面结构
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::GetNextTupleRID: page corrupted, reinitializing");
+        Init(GetPageId(), INVALID_PAGE_ID);
         return false;
     }
 
     if (header->num_tuples == 0) {
-        LOG_DEBUG("TablePage::GetNextTupleRID: page " << GetPageId() << " has no tuples");
         return false;
     }
 
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
+    
     int start_slot = current_rid.slot_num + 1;
     if (start_slot < 0) {
         start_slot = 0;
     }
 
-    LOG_DEBUG("TablePage::GetNextTupleRID: searching from slot "
-              << start_slot << ", total slots: " << header->num_tuples
-              << ", free_space_offset: " << header->free_space_offset
-              << " on page " << GetPageId());
-
     for (int i = start_slot; i < header->num_tuples; i++) {
-        // Additional slot validation
-        if (slots[i].size > 0 && slots[i].size <= PAGE_SIZE &&
-            slots[i].offset >= header->free_space_offset &&
-            slots[i].offset + slots[i].size <= PAGE_SIZE &&
-            slots[i].offset >= sizeof(TablePageHeader)) {
+        if (slots[i].size > 0) {
             next_rid->page_id = GetPageId();
             next_rid->slot_num = i;
-            LOG_DEBUG("TablePage::GetNextTupleRID: found valid tuple at slot "
-                      << i << " offset=" << slots[i].offset
-                      << " size=" << slots[i].size << " on page " << GetPageId());
             return true;
-        } else if (slots[i].size > 0) {
-            LOG_WARN("TablePage::GetNextTupleRID: invalid slot "
-                     << i << " size=" << slots[i].size
-                     << " offset=" << slots[i].offset << " (free_space_offset="
-                     << header->free_space_offset << ") on page " << GetPageId());
         }
     }
 
-    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found on page " << GetPageId());
     return false;
 }
 
@@ -336,67 +439,58 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
     size_t tuple_size = tuple.GetSerializedSize();
     size_t slot_size = sizeof(Slot);
     auto* header = GetHeader();
+    const size_t header_size = sizeof(TablePageHeader);
 
-    LOG_DEBUG("TablePage::InsertTuple: page "
-              << GetPageId() << " tuple_size=" << tuple_size
+    LOG_DEBUG("TablePage::InsertTuple: page " << GetPageId() 
+              << " tuple_size=" << tuple_size
               << " current_tuples=" << header->num_tuples
               << " free_space_offset=" << header->free_space_offset);
 
-    // Enhanced validation
-    if (tuple_size == 0 || tuple_size > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size << " on page " << GetPageId());
+    // 基本验证
+    if (tuple_size == 0 || tuple_size > PAGE_SIZE / 2) {
+        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size);
         return false;
     }
 
-    // Check for corruption before proceeding
-    if (header->num_tuples < 0 || header->num_tuples > (PAGE_SIZE / 8)) {
-        LOG_ERROR("TablePage::InsertTuple: corrupted num_tuples=" << header->num_tuples << " on page " << GetPageId());
-        return false;
+    // 验证和修复页面结构
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::InsertTuple: page severely corrupted, reinitializing");
+        Init(GetPageId(), INVALID_PAGE_ID);
+        header = GetHeader();
     }
 
-    if (header->free_space_offset < sizeof(TablePageHeader) || header->free_space_offset > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: corrupted free_space_offset=" << header->free_space_offset << " on page " << GetPageId());
-        return false;
-    }
-
-    size_t required_space = tuple_size + slot_size;
-    size_t slot_end_offset = sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
+    // 计算空间需求
+    size_t slot_end_offset = header_size + (header->num_tuples + 1) * slot_size; // +1 for new slot
+    size_t required_data_space = tuple_size;
     
-    if (header->free_space_offset < slot_end_offset) {
-        LOG_ERROR("TablePage::InsertTuple: free_space_offset=" << header->free_space_offset
-                  << " < slot_end_offset=" << slot_end_offset << " on page " << GetPageId());
+    // 检查总空间是否足够
+    if (slot_end_offset + required_data_space > header->free_space_offset) {
+        LOG_DEBUG("TablePage::InsertTuple: insufficient space. "
+                 << "slot_end=" << slot_end_offset 
+                 << " + data=" << required_data_space
+                 << " > free_offset=" << header->free_space_offset);
         return false;
     }
 
-    size_t free_space = header->free_space_offset - slot_end_offset;
-    if (free_space < required_space) {
-        LOG_DEBUG("TablePage::InsertTuple: insufficient space. required="
-                 << required_space << " available=" << free_space
-                 << " (tuple_size=" << tuple_size << ", slot_size=" << slot_size
-                 << ", num_tuples=" << header->num_tuples
-                 << ", slot_end_offset=" << slot_end_offset 
-                 << ", free_space_offset=" << header->free_space_offset 
-                 << ") on page " << GetPageId());
-        return false;
-    }
-
-    // Perform the insertion
+    // 执行插入
     header->free_space_offset -= tuple_size;
     char* tuple_data = GetData() + header->free_space_offset;
     tuple.SerializeTo(tuple_data);
 
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    // 添加新槽
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     slots[header->num_tuples].offset = header->free_space_offset;
     slots[header->num_tuples].size = tuple_size;
 
     rid->page_id = GetPageId();
     rid->slot_num = header->num_tuples;
 
-    LOG_DEBUG("TablePage::InsertTuple: inserted at slot "
-              << header->num_tuples << " offset=" << header->free_space_offset
-              << " size=" << tuple_size << " on page " << GetPageId());
-
     header->num_tuples++;
+
+    LOG_DEBUG("TablePage::InsertTuple: inserted at slot " << rid->slot_num 
+              << " offset=" << slots[rid->slot_num].offset
+              << " size=" << tuple_size);
+
     return true;
 }
 

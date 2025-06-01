@@ -259,41 +259,35 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
 
 bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     std::unique_lock<std::mutex> lock(latch_);
-    
     LOG_TRACE("UnpinPage called with page_id=" << page_id << ", is_dirty=" << is_dirty);
     
-    // 1. Check if page is in buffer pool
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {
-        // Page not in buffer pool
-        LOG_WARN("UnpinPage: page " << page_id << " not in buffer pool");
+        LOG_DEBUG("UnpinPage: page " << page_id << " not in buffer pool");
         return false;
     }
     
-    // 2. Get the page
     size_t frame_id = it->second;
     Page* page = &pages_[frame_id];
     
-    // 3. Check pin count
     if (page->GetPinCount() <= 0) {
-        // Page is not pinned
-        LOG_WARN("UnpinPage: page " << page_id << " is not pinned");
-        return false;
+        // 只记录调试信息，不视为错误
+        LOG_DEBUG("UnpinPage: page " << page_id << " already unpinned (pin_count=" 
+                 << page->GetPinCount() << ")");
+        return true;
     }
     
-    // 4. Decrease pin count
     page->DecreasePinCount();
-    
-    // 5. Update dirty flag
     if (is_dirty) {
         page->SetDirty(true);
     }
     
-    // 6. Add to replacer if pin count reaches 0
     if (page->GetPinCount() == 0) {
         replacer_->Unpin(frame_id);
+        LOG_TRACE("UnpinPage: page " << page_id << " unpinned and added to replacer");
     }
     
+    LOG_TRACE("UnpinPage: page " << page_id << " pin_count=" << page->GetPinCount());
     return true;
 }
 

@@ -420,12 +420,15 @@ void Catalog::SaveCatalogToDisk() {
         LOG_DEBUG("SaveCatalogToDisk: Save already in progress, skipping");
         return;
     }
+
     if (!buffer_pool_manager_) {
         LOG_DEBUG(
             "SaveCatalogToDisk: BufferPoolManager is null, skipping save");
         return;
     }
+
     save_in_progress_.store(true);
+
     try {
         LOG_DEBUG("SaveCatalogToDisk: Starting catalog save");
         Page* catalog_page = buffer_pool_manager_->FetchPage(1);
@@ -448,7 +451,10 @@ void Catalog::SaveCatalogToDisk() {
         } else {
             LOG_DEBUG("SaveCatalogToDisk: Found existing catalog page 1");
         }
+
+        // 确保页面被正确pin
         catalog_page->IncreasePinCount();
+
         char* data = catalog_page->GetData();
         std::memset(data, 0, PAGE_SIZE);
         size_t offset = 0;
@@ -470,7 +476,6 @@ void Catalog::SaveCatalogToDisk() {
         offset += sizeof(uint32_t);
         LOG_DEBUG("SaveCatalogToDisk: Writing " << table_count << " tables");
 
-        // 保存表信息
         for (const auto& [table_name, table_info] : tables_) {
             LOG_DEBUG("SaveCatalogToDisk: Writing table " << table_name);
             size_t required_space = sizeof(oid_t) + sizeof(page_id_t) +
@@ -483,16 +488,19 @@ void Catalog::SaveCatalogToDisk() {
                     << table_name);
                 break;
             }
+
             std::memcpy(data + offset, &table_info->table_oid, sizeof(oid_t));
             offset += sizeof(oid_t);
             std::memcpy(data + offset, &table_info->first_page_id,
                         sizeof(page_id_t));
             offset += sizeof(page_id_t);
+
             uint32_t name_len = static_cast<uint32_t>(table_name.length());
             std::memcpy(data + offset, &name_len, sizeof(uint32_t));
             offset += sizeof(uint32_t);
             std::memcpy(data + offset, table_name.c_str(), name_len);
             offset += name_len;
+
             try {
                 SerializeSchema(*table_info->schema, data, offset);
                 LOG_DEBUG(
@@ -507,7 +515,6 @@ void Catalog::SaveCatalogToDisk() {
             }
         }
 
-        // 保存索引信息
         uint32_t index_count = static_cast<uint32_t>(indexes_.size());
         if (offset + sizeof(uint32_t) <= PAGE_SIZE) {
             std::memcpy(data + offset, &index_count, sizeof(uint32_t));
@@ -524,19 +531,16 @@ void Catalog::SaveCatalogToDisk() {
                 for (const auto& column : index_info->key_columns) {
                     required_space += sizeof(uint32_t) + column.length();
                 }
-
                 if (offset + required_space > PAGE_SIZE) {
                     LOG_ERROR("SaveCatalogToDisk: Not enough space for index "
                               << index_name);
                     break;
                 }
 
-                // 保存索引OID
                 std::memcpy(data + offset, &index_info->index_oid,
                             sizeof(oid_t));
                 offset += sizeof(oid_t);
 
-                // 保存索引名称
                 uint32_t index_name_len =
                     static_cast<uint32_t>(index_name.length());
                 std::memcpy(data + offset, &index_name_len, sizeof(uint32_t));
@@ -544,7 +548,6 @@ void Catalog::SaveCatalogToDisk() {
                 std::memcpy(data + offset, index_name.c_str(), index_name_len);
                 offset += index_name_len;
 
-                // 保存表名称
                 uint32_t table_name_len =
                     static_cast<uint32_t>(index_info->table_name.length());
                 std::memcpy(data + offset, &table_name_len, sizeof(uint32_t));
@@ -553,7 +556,6 @@ void Catalog::SaveCatalogToDisk() {
                             table_name_len);
                 offset += table_name_len;
 
-                // 保存键列数量和键列名称
                 uint32_t key_column_count =
                     static_cast<uint32_t>(index_info->key_columns.size());
                 std::memcpy(data + offset, &key_column_count, sizeof(uint32_t));
@@ -567,7 +569,6 @@ void Catalog::SaveCatalogToDisk() {
                     std::memcpy(data + offset, column.c_str(), column_len);
                     offset += column_len;
                 }
-
                 LOG_DEBUG("SaveCatalogToDisk: Successfully wrote index "
                           << index_name);
             }
@@ -581,17 +582,23 @@ void Catalog::SaveCatalogToDisk() {
         LOG_DEBUG("SaveCatalogToDisk: Final offset: " << offset << " bytes");
         catalog_page->SetDirty(true);
         page_id_t catalog_page_id = catalog_page->GetPageId();
+
+        // 正确地unpin页面
         while (catalog_page->GetPinCount() > 0) {
             buffer_pool_manager_->UnpinPage(catalog_page_id, true);
         }
+
         bool flush_success = buffer_pool_manager_->FlushPage(catalog_page_id);
         LOG_DEBUG("SaveCatalogToDisk: Force flush result: "
                   << (flush_success ? "success" : "failed"));
+
         buffer_pool_manager_->FlushAllPages();
         LOG_DEBUG("SaveCatalogToDisk: Catalog save completed successfully");
+
     } catch (const std::exception& e) {
         LOG_ERROR("SaveCatalogToDisk: Exception during save: " << e.what());
     }
+
     save_in_progress_.store(false);
 }
 

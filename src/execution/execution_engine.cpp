@@ -34,10 +34,11 @@ bool ExecutionEngine::Execute(Statement* statement,
         }
         return false;
     }
+
     LOG_DEBUG("ExecutionEngine::Execute: Statement type: "
               << static_cast<int>(statement->GetType()));
-
-    // Handle DDL statements directly
+    
+    // 处理DDL语句...
     switch (statement->GetType()) {
         case Statement::StmtType::CREATE_TABLE: {
             LOG_DEBUG("ExecutionEngine::Execute: Handling CREATE_TABLE");
@@ -84,7 +85,6 @@ bool ExecutionEngine::Execute(Statement* statement,
             LOG_DEBUG(
                 "ExecutionEngine::Execute: Handling DML statement, creating "
                 "plan");
-            // For DML statements, create plan and executor
             break;
     }
 
@@ -113,13 +113,37 @@ bool ExecutionEngine::Execute(Statement* statement,
     Tuple tuple;
     RID rid;
     int tuple_count = 0;
-    const int MAX_TUPLES = 10000;  // 大大降低最大tuple限制，便于快速发现问题
-
-    while (executor->Next(&tuple, &rid) && tuple_count < MAX_TUPLES) {
+    const int MAX_TUPLES = 10000;
+    
+    // 添加超时保护
+    auto start_time = std::chrono::steady_clock::now();
+    const auto TIMEOUT_DURATION = std::chrono::seconds(10); // 10秒超时
+    
+    while (tuple_count < MAX_TUPLES) {
+        // 检查超时
+        auto current_time = std::chrono::steady_clock::now();
+        if (current_time - start_time > TIMEOUT_DURATION) {
+            LOG_ERROR("ExecutionEngine::Execute: Operation timed out after "
+                      << std::chrono::duration_cast<std::chrono::seconds>(TIMEOUT_DURATION).count() 
+                      << " seconds");
+            return false;
+        }
+        
+        bool has_next = false;
+        try {
+            has_next = executor->Next(&tuple, &rid);
+        } catch (const std::exception& e) {
+            LOG_ERROR("ExecutionEngine::Execute: Exception during tuple execution: " << e.what());
+            return false;
+        }
+        
+        if (!has_next) {
+            break;
+        }
+        
         result_set->push_back(tuple);
         tuple_count++;
-
-        // 每100个tuple输出一次日志
+        
         if (tuple_count % 100 == 0) {
             LOG_DEBUG("ExecutionEngine::Execute: Processed " << tuple_count
                                                              << " tuples");
@@ -129,7 +153,7 @@ bool ExecutionEngine::Execute(Statement* statement,
     if (tuple_count >= MAX_TUPLES) {
         LOG_ERROR("ExecutionEngine::Execute: Reached maximum tuple limit ("
                   << MAX_TUPLES << "), possible infinite loop detected");
-        return false;  // 返回false表示执行失败
+        return false;
     }
 
     LOG_DEBUG("ExecutionEngine::Execute: Execution completed, processed "

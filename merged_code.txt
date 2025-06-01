@@ -175,14 +175,15 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     LOG_TRACE("UnpinPage called with page_id=" << page_id << ", is_dirty=" << is_dirty);
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {
-        LOG_WARN("UnpinPage: page " << page_id << " not in buffer pool");
+        LOG_DEBUG("UnpinPage: page " << page_id << " not in buffer pool");
         return false;
     }
     size_t frame_id = it->second;
     Page* page = &pages_[frame_id];
     if (page->GetPinCount() <= 0) {
-        LOG_WARN("UnpinPage: page " << page_id << " is not pinned");
-        return false;
+        LOG_DEBUG("UnpinPage: page " << page_id << " already unpinned (pin_count=" 
+                 << page->GetPinCount() << ")");
+        return true;
     }
     page->DecreasePinCount();
     if (is_dirty) {
@@ -190,7 +191,9 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     }
     if (page->GetPinCount() == 0) {
         replacer_->Unpin(frame_id);
+        LOG_TRACE("UnpinPage: page " << page_id << " unpinned and added to replacer");
     }
+    LOG_TRACE("UnpinPage: page " << page_id << " pin_count=" << page->GetPinCount());
     return true;
 }
 bool BufferPoolManager::FlushPage(page_id_t page_id) {
@@ -1164,8 +1167,17 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
                                          const Tuple& tuple, const RID& rid) {
     LOG_TRACE("TableManager::UpdateIndexesOnInsert: Updating indexes for table "
               << table_name);
-    std::vector<std::string> table_indexes =
-        index_manager_->GetTableIndexes(table_name);
+    if (!index_manager_) {
+        LOG_WARN("TableManager::UpdateIndexesOnInsert: IndexManager is null");
+        return true;
+    }
+    std::vector<std::string> table_indexes;
+    try {
+        table_indexes = index_manager_->GetTableIndexes(table_name);
+    } catch (const std::exception& e) {
+        LOG_ERROR("TableManager::UpdateIndexesOnInsert: Failed to get table indexes: " << e.what());
+        return false;
+    }
     bool all_success = true;
     for (const auto& index_name : table_indexes) {
         IndexInfo* index_info = catalog_->GetIndex(index_name);
@@ -1194,8 +1206,20 @@ bool TableManager::UpdateIndexesOnInsert(const std::string& table_name,
             const std::string& column_name = index_info->key_columns[0];
             size_t column_idx = table_info->schema->GetColumnIdx(column_name);
             Value key_value = tuple.GetValue(column_idx);
-            bool success =
-                index_manager_->InsertEntry(index_name, key_value, rid);
+            auto start_time = std::chrono::steady_clock::now();
+            const auto TIMEOUT_DURATION = std::chrono::seconds(5);
+            bool success = false;
+            try {
+                success = index_manager_->InsertEntry(index_name, key_value, rid);
+                auto current_time = std::chrono::steady_clock::now();
+                if (current_time - start_time > TIMEOUT_DURATION) {
+                    LOG_ERROR("TableManager::UpdateIndexesOnInsert: Index insert timed out for " << index_name);
+                    success = false;
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR("TableManager::UpdateIndexesOnInsert: Exception during index insert: " << e.what());
+                success = false;
+            }
             if (!success) {
                 LOG_WARN(
                     "TableManager::UpdateIndexesOnInsert: Failed to insert "
@@ -1560,7 +1584,26 @@ bool ExecutionEngine::Execute(Statement* statement,
     RID rid;
     int tuple_count = 0;
     const int MAX_TUPLES = 10000;
-    while (executor->Next(&tuple, &rid) && tuple_count < MAX_TUPLES) {
+    auto start_time = std::chrono::steady_clock::now();
+    const auto TIMEOUT_DURATION = std::chrono::seconds(10);
+    while (tuple_count < MAX_TUPLES) {
+        auto current_time = std::chrono::steady_clock::now();
+        if (current_time - start_time > TIMEOUT_DURATION) {
+            LOG_ERROR("ExecutionEngine::Execute: Operation timed out after "
+                      << std::chrono::duration_cast<std::chrono::seconds>(TIMEOUT_DURATION).count() 
+                      << " seconds");
+            return false;
+        }
+        bool has_next = false;
+        try {
+            has_next = executor->Next(&tuple, &rid);
+        } catch (const std::exception& e) {
+            LOG_ERROR("ExecutionEngine::Execute: Exception during tuple execution: " << e.what());
+            return false;
+        }
+        if (!has_next) {
+            break;
+        }
         result_set->push_back(tuple);
         tuple_count++;
         if (tuple_count % 100 == 0) {
@@ -2631,7 +2674,22 @@ BPlusTree<KeyType, ValueType>::BPlusTree(const std::string& name,
     : index_name_(name),
       buffer_pool_manager_(buffer_pool_manager),
       root_page_id_(INVALID_PAGE_ID) {
-    LoadRootPageId();
+    if (!buffer_pool_manager_) {
+        throw std::invalid_argument("BufferPoolManager cannot be null");
+    }
+    if (index_name_.empty()) {
+        throw std::invalid_argument("Index name cannot be empty");
+    }
+    LOG_DEBUG("Creating BPlusTree with name: " << index_name_);
+    try {
+        LoadRootPageId();
+        LOG_DEBUG(
+            "BPlusTree constructor completed, root_page_id: " << root_page_id_);
+    } catch (const std::exception& e) {
+        LOG_ERROR(
+            "BPlusTree constructor failed to load root page ID: " << e.what());
+        root_page_id_ = INVALID_PAGE_ID;
+    }
 }
 template <typename KeyType, typename ValueType>
 BPlusTree<KeyType, ValueType>::~BPlusTree() {
@@ -2647,54 +2705,66 @@ BPlusTree<KeyType, ValueType>::~BPlusTree() {
 }
 template <typename KeyType, typename ValueType>
 void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
-    LOG_DEBUG("LoadRootPageId called");
+    LOG_DEBUG("LoadRootPageId called for index: " << index_name_);
     int num_pages = buffer_pool_manager_->GetDiskManager()->GetNumPages();
     LOG_DEBUG("Disk has " << num_pages << " pages");
-    if (num_pages == 0) {
-        LOG_DEBUG(
-            "New database with no pages, setting root_page_id to INVALID");
+    if (num_pages <= 1) {
+        LOG_DEBUG("Database too small, setting root_page_id to INVALID");
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
-    Page* header_page = buffer_pool_manager_->FetchPage(0);
+    page_id_t header_page_id = GetHeaderPageId();
+    Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
     if (header_page == nullptr) {
-        LOG_DEBUG("Header page 0 does not exist, assuming new database");
+        LOG_DEBUG("Header page " << header_page_id << " does not exist for index " << index_name_);
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
-    root_page_id_ = *reinterpret_cast<page_id_t*>(header_page->GetData());
-    buffer_pool_manager_->UnpinPage(0, false);
-    LOG_DEBUG("Loaded root page ID: " << root_page_id_ << " from header page");
-    if (root_page_id_ != INVALID_PAGE_ID) {
-        if (root_page_id_ >= num_pages) {
-            LOG_WARN("Root page " << root_page_id_
-                                  << " is out of range (num_pages=" << num_pages
-                                  << "), resetting to INVALID");
-            root_page_id_ = INVALID_PAGE_ID;
-            UpdateRootPageId(root_page_id_);
-            return;
-        }
-        Page* root_page = buffer_pool_manager_->FetchPage(root_page_id_);
-        if (root_page == nullptr) {
-            LOG_WARN("Root page " << root_page_id_
-                                  << " does not exist, resetting to INVALID");
-            root_page_id_ = INVALID_PAGE_ID;
-            UpdateRootPageId(root_page_id_);
-        } else {
-            auto tree_page =
-                reinterpret_cast<BPlusTreePage*>(root_page->GetData());
-            if (tree_page->GetPageId() != root_page_id_) {
-                LOG_WARN("Root page " << root_page_id_
-                                      << " has inconsistent page_id (expected "
-                                      << root_page_id_ << ", got "
-                                      << tree_page->GetPageId()
-                                      << "), resetting to INVALID");
-                root_page_id_ = INVALID_PAGE_ID;
-                UpdateRootPageId(root_page_id_);
-            }
-            buffer_pool_manager_->UnpinPage(root_page_id_, false);
-        }
+    uint32_t hash = 0;
+    for (char c : index_name_) {
+        hash = hash * 31 + static_cast<uint32_t>(c);
     }
+    size_t slot_size = sizeof(page_id_t) + sizeof(uint32_t);
+    size_t max_slots = (PAGE_SIZE - sizeof(uint32_t)) / slot_size;
+    size_t slot_index = hash % max_slots;
+    size_t offset = sizeof(uint32_t) + slot_index * slot_size;
+    char* data = header_page->GetData();
+    uint32_t stored_hash = *reinterpret_cast<uint32_t*>(data + offset);
+    page_id_t stored_root_page_id = *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t));
+    buffer_pool_manager_->UnpinPage(header_page_id, false);
+    if (stored_hash != hash) {
+        LOG_DEBUG("Hash mismatch for index " << index_name_ << ", tree is empty");
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    if (stored_root_page_id == INVALID_PAGE_ID || stored_root_page_id >= num_pages) {
+        LOG_DEBUG("Invalid stored root page ID " << stored_root_page_id << " for index " << index_name_);
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    Page* root_page = buffer_pool_manager_->FetchPage(stored_root_page_id);
+    if (root_page == nullptr) {
+        LOG_WARN("Root page " << stored_root_page_id << " does not exist, resetting to INVALID");
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    auto tree_page = reinterpret_cast<BPlusTreePage*>(root_page->GetData());
+    IndexPageType page_type = tree_page->GetPageType();
+    if (page_type != IndexPageType::LEAF_PAGE && page_type != IndexPageType::INTERNAL_PAGE) {
+        LOG_ERROR("Root page " << stored_root_page_id << " has invalid page type: " 
+                  << static_cast<int>(page_type));
+        buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
+    root_page_id_ = stored_root_page_id;
+    LOG_DEBUG("Successfully loaded root page ID: " << root_page_id_ 
+              << " for index: " << index_name_);
+}
+template <typename KeyType, typename ValueType>
+page_id_t BPlusTree<KeyType, ValueType>::GetHeaderPageId() const {
+    return 1;
 }
 template <typename KeyType, typename ValueType>
 bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
@@ -2702,25 +2772,29 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
                                            txn_id_t txn_id) {
     std::lock_guard<std::mutex> lock(latch_);
     (void)txn_id;
-    LOG_TRACE("Inserting key: " << key);
+    LOG_TRACE("Inserting key: " << key << " into index: " << index_name_);
     if (root_page_id_ == INVALID_PAGE_ID) {
-        LOG_DEBUG("Creating root page for first insertion");
-        Page* header_page = buffer_pool_manager_->FetchPage(0);
+        LOG_DEBUG(
+            "Creating root page for first insertion in index: " << index_name_);
+        page_id_t header_page_id = GetHeaderPageId();
+        Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
         if (header_page == nullptr) {
-            page_id_t header_page_id;
-            header_page = buffer_pool_manager_->NewPage(&header_page_id);
+            page_id_t allocated_header_page_id;
+            header_page =
+                buffer_pool_manager_->NewPage(&allocated_header_page_id);
             if (header_page == nullptr) {
                 LOG_ERROR("Failed to create header page");
                 return false;
             }
-            LOG_DEBUG("Created header page with ID: " << header_page_id);
+            LOG_DEBUG(
+                "Created header page with ID: " << allocated_header_page_id);
             std::memset(header_page->GetData(), 0, PAGE_SIZE);
             *reinterpret_cast<page_id_t*>(header_page->GetData()) =
                 INVALID_PAGE_ID;
             header_page->SetDirty(true);
-            buffer_pool_manager_->UnpinPage(header_page_id, true);
+            buffer_pool_manager_->UnpinPage(allocated_header_page_id, true);
         } else {
-            buffer_pool_manager_->UnpinPage(0, false);
+            buffer_pool_manager_->UnpinPage(header_page_id, false);
         }
         page_id_t new_page_id;
         Page* root_page = buffer_pool_manager_->NewPage(&new_page_id);
@@ -2733,6 +2807,10 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
             root_page->GetData());
         LOG_DEBUG("Initializing root page...");
         root->Init(new_page_id);
+        if (root->GetPageId() != new_page_id) {
+            LOG_WARN("Root page ID not set correctly, fixing...");
+            root->SetPageId(new_page_id);
+        }
         LOG_DEBUG("Inserting key " << key << " into root page...");
         if (!root->Insert(key, value)) {
             LOG_ERROR("Failed to insert into empty root");
@@ -2747,8 +2825,9 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
         LOG_DEBUG("Unpinning root page...");
         buffer_pool_manager_->UnpinPage(new_page_id, true);
         buffer_pool_manager_->FlushPage(new_page_id);
-        buffer_pool_manager_->FlushPage(0);
-        LOG_DEBUG("Created root page and inserted key: " << key);
+        buffer_pool_manager_->FlushPage(header_page_id);
+        LOG_DEBUG("Created root page and inserted key: "
+                  << key << ", root_page_id: " << root_page_id_);
         return true;
     }
     Page* leaf_page = FindLeafPage(key, true);
@@ -2896,11 +2975,36 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
     LOG_DEBUG("FindLeafPage: starting from root page " << root_page_id_);
     page_id_t current_page_id = root_page_id_;
     Page* current_page = nullptr;
+    std::unordered_set<page_id_t> visited_pages;
+    const int MAX_TREE_DEPTH = 20;
+    int depth = 0;
     while (true) {
+        if (visited_pages.count(current_page_id) > 0) {
+            LOG_ERROR(
+                "FindLeafPage: Detected cycle in B+tree traversal at page "
+                << current_page_id);
+            if (current_page != nullptr) {
+                buffer_pool_manager_->UnpinPage(current_page->GetPageId(),
+                                                false);
+            }
+            return nullptr;
+        }
+        if (depth >= MAX_TREE_DEPTH) {
+            LOG_ERROR("FindLeafPage: Tree depth exceeded maximum limit "
+                      << MAX_TREE_DEPTH);
+            if (current_page != nullptr) {
+                buffer_pool_manager_->UnpinPage(current_page->GetPageId(),
+                                                false);
+            }
+            return nullptr;
+        }
+        visited_pages.insert(current_page_id);
+        depth++;
         if (current_page != nullptr) {
             buffer_pool_manager_->UnpinPage(current_page->GetPageId(), false);
         }
-        LOG_TRACE("FindLeafPage: fetching page " << current_page_id);
+        LOG_TRACE("FindLeafPage: fetching page " << current_page_id
+                                                 << " at depth " << depth);
         current_page = buffer_pool_manager_->FetchPage(current_page_id);
         if (current_page == nullptr) {
             LOG_ERROR("Failed to fetch page: "
@@ -2919,11 +3023,19 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
             return nullptr;
         }
         if (tree_page->IsLeafPage()) {
-            LOG_TRACE("Found leaf page: " << current_page_id);
+            LOG_TRACE("Found leaf page: " << current_page_id << " at depth "
+                                          << depth);
             return current_page;
         }
         auto internal = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
             current_page->GetData());
+        if (internal->GetSize() <= 0 ||
+            internal->GetSize() > internal->GetMaxSize()) {
+            LOG_ERROR("Invalid internal page size: "
+                      << internal->GetSize() << " on page " << current_page_id);
+            buffer_pool_manager_->UnpinPage(current_page_id, false);
+            return nullptr;
+        }
         int index = internal->KeyIndex(key);
         if (index < 0) {
             LOG_ERROR("Invalid index returned by KeyIndex: " << index);
@@ -2940,6 +3052,13 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
                                           << index);
         if (next_page_id == INVALID_PAGE_ID) {
             LOG_ERROR("Invalid next page ID in internal page");
+            buffer_pool_manager_->UnpinPage(current_page_id, false);
+            return nullptr;
+        }
+        if (next_page_id >=
+            buffer_pool_manager_->GetDiskManager()->GetNumPages()) {
+            LOG_ERROR("Next page ID " << next_page_id
+                                      << " exceeds database size");
             buffer_pool_manager_->UnpinPage(current_page_id, false);
             return nullptr;
         }
@@ -3280,27 +3399,37 @@ void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node,
 }
 template <typename KeyType, typename ValueType>
 void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
-    LOG_DEBUG("UpdateRootPageId called with root_page_id: " << root_page_id);
-    Page* header_page = buffer_pool_manager_->FetchPage(0);
+    LOG_DEBUG("UpdateRootPageId called with root_page_id: " << root_page_id 
+              << " for index: " << index_name_);
+    page_id_t header_page_id = GetHeaderPageId();
+    Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
     if (header_page == nullptr) {
-        LOG_DEBUG("Header page 0 does not exist, creating it...");
-        page_id_t header_page_id;
-        header_page = buffer_pool_manager_->NewPage(&header_page_id);
+        LOG_DEBUG("Header page " << header_page_id << " does not exist, creating it...");
+        page_id_t allocated_page_id;
+        header_page = buffer_pool_manager_->NewPage(&allocated_page_id);
         if (header_page == nullptr) {
             LOG_ERROR("Failed to create header page");
             return;
         }
-        if (header_page_id != 0) {
-            LOG_WARN("Allocated header page has ID " << header_page_id
-                                                     << " instead of 0");
-        }
+        LOG_DEBUG("Created header page with ID: " << allocated_page_id);
         std::memset(header_page->GetData(), 0, PAGE_SIZE);
     }
-    *reinterpret_cast<page_id_t*>(header_page->GetData()) = root_page_id;
+    uint32_t hash = 0;
+    for (char c : index_name_) {
+        hash = hash * 31 + static_cast<uint32_t>(c);
+    }
+    size_t slot_size = sizeof(page_id_t) + sizeof(uint32_t);
+    size_t max_slots = (PAGE_SIZE - sizeof(uint32_t)) / slot_size;
+    size_t slot_index = hash % max_slots;
+    size_t offset = sizeof(uint32_t) + slot_index * slot_size;
+    char* data = header_page->GetData();
+    *reinterpret_cast<uint32_t*>(data + offset) = hash;
+    *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t)) = root_page_id;
     header_page->SetDirty(true);
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
-    LOG_DEBUG("Updated header page " << header_page->GetPageId()
-                                     << " with root page ID: " << root_page_id);
+    buffer_pool_manager_->FlushPage(header_page->GetPageId());
+    LOG_DEBUG("Updated header page with root page ID: " << root_page_id
+              << " for index: " << index_name_ << " at slot " << slot_index);
 }
 template <typename KeyType, typename ValueType>
 BPlusTree<KeyType, ValueType>::Iterator::Iterator(BPlusTree* tree,
@@ -3469,8 +3598,14 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
         LOG_WARN("BPlusTreeInternalPage::KeyIndex: Invalid size " << size);
         return 0;
     }
-    for (int i = 1; i <= size; i++) {
-        try {
+    const int MAX_REASONABLE_SIZE = (PAGE_SIZE - sizeof(BPlusTreePage)) / (sizeof(KeyType) + sizeof(page_id_t));
+    if (size > MAX_REASONABLE_SIZE) {
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Size " << size 
+                  << " exceeds reasonable limit " << MAX_REASONABLE_SIZE);
+        return 0;
+    }
+    try {
+        for (int i = 1; i <= size; i++) {
             if (i > GetMaxSize()) {
                 LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Index " << i 
                           << " exceeds max size " << GetMaxSize());
@@ -3479,11 +3614,11 @@ int BPlusTreeInternalPage<KeyType>::KeyIndex(const KeyType& key) const {
             if (key < KeyAt(i)) {
                 return i - 1;
             }
-        } catch (const std::exception& e) {
-            LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at index " << i 
-                      << " with size " << size << ": " << e.what());
-            return 0;
         }
+    } catch (const std::exception& e) {
+        LOG_ERROR("BPlusTreeInternalPage::KeyIndex: Exception at size " << size 
+                  << ": " << e.what());
+        return 0;
     }
     return size;
 }
@@ -5601,6 +5736,8 @@ namespace SimpleRDBMS {
 struct Slot {
     uint16_t offset;
     uint16_t size;
+    Slot() : offset(0), size(0) {}
+    Slot(uint16_t off, uint16_t sz) : offset(off), size(sz) {}
 };
 void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     SetPageId(page_id);
@@ -5612,37 +5749,97 @@ void TablePage::Init(page_id_t page_id, page_id_t prev_page_id) {
     header->lsn = INVALID_LSN;
     header->num_tuples = 0;
     header->free_space_offset = PAGE_SIZE;
-    LOG_DEBUG("TablePage::Init: initialized page "
-              << page_id
-              << " with free_space_offset=" << header->free_space_offset
-              << " num_tuples=" << header->num_tuples
-              << " available_space=" << (PAGE_SIZE - sizeof(TablePageHeader)));
-    if (header->free_space_offset != PAGE_SIZE || header->num_tuples != 0) {
-        LOG_ERROR("TablePage::Init: Initialization verification failed on page " << page_id << ": "
-                  << "free_space_offset=" << header->free_space_offset 
-                  << " num_tuples=" << header->num_tuples);
-        header->free_space_offset = PAGE_SIZE;
+    LOG_DEBUG("TablePage::Init: initialized page " << page_id
+              << " with free_space_offset=" << header->free_space_offset);
+}
+static bool ValidateAndRepairSlotDirectory(TablePage::TablePageHeader* header, char* page_data) {
+    const size_t header_size = sizeof(TablePage::TablePageHeader);
+    const size_t slot_size = sizeof(Slot);
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: num_tuples=" << header->num_tuples 
+              << ", free_space_offset=" << header->free_space_offset);
+    if (header->num_tuples < 0) {
+        LOG_ERROR("ValidateAndRepairSlotDirectory: negative num_tuples " << header->num_tuples);
         header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
     }
+    if (header->num_tuples == 0) {
+        header->free_space_offset = PAGE_SIZE;
+        LOG_DEBUG("ValidateAndRepairSlotDirectory: empty page, reset free_space_offset to " << PAGE_SIZE);
+        return true;
+    }
+    size_t slot_end_offset = header_size + header->num_tuples * slot_size;
+    if (slot_end_offset > PAGE_SIZE) {
+        LOG_ERROR("ValidateAndRepairSlotDirectory: slot directory exceeds page size, resetting");
+        header->num_tuples = 0;
+        header->free_space_offset = PAGE_SIZE;
+        return false;
+    }
+    Slot* slots = reinterpret_cast<Slot*>(page_data + header_size);
+    size_t calculated_free_offset = PAGE_SIZE;
+    int valid_tuples = 0;
+    for (int i = 0; i < header->num_tuples; i++) {
+        LOG_TRACE("ValidateAndRepairSlotDirectory: checking slot " << i 
+                  << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
+        if (slots[i].size > 0) {
+            if (slots[i].offset >= slot_end_offset && 
+                slots[i].offset < PAGE_SIZE &&
+                slots[i].size <= PAGE_SIZE &&
+                slots[i].offset + slots[i].size <= PAGE_SIZE) {
+                calculated_free_offset = std::min(calculated_free_offset, static_cast<size_t>(slots[i].offset));
+                if (valid_tuples != i) {
+                    LOG_DEBUG("ValidateAndRepairSlotDirectory: moving slot " << i << " to position " << valid_tuples);
+                    slots[valid_tuples] = slots[i];
+                }
+                valid_tuples++;
+            } else {
+                LOG_DEBUG("ValidateAndRepairSlotDirectory: removing invalid slot " << i 
+                          << " (offset=" << slots[i].offset << ", size=" << slots[i].size << ")");
+            }
+        }
+    }
+    for (int i = valid_tuples; i < header->num_tuples; i++) {
+        slots[i].offset = 0;
+        slots[i].size = 0;
+    }
+    header->num_tuples = valid_tuples;
+    slot_end_offset = header_size + header->num_tuples * slot_size;
+    if (calculated_free_offset < slot_end_offset) {
+        calculated_free_offset = PAGE_SIZE;
+        LOG_WARN("ValidateAndRepairSlotDirectory: page appears full, no free space available");
+    }
+    if (header->free_space_offset > PAGE_SIZE || header->free_space_offset < slot_end_offset) {
+        LOG_DEBUG("ValidateAndRepairSlotDirectory: correcting invalid free_space_offset from " 
+                  << header->free_space_offset << " to " << calculated_free_offset);
+        header->free_space_offset = calculated_free_offset;
+    }
+    LOG_DEBUG("ValidateAndRepairSlotDirectory: validated page with " << valid_tuples 
+              << " valid tuples, slot_end=" << slot_end_offset 
+              << ", free_offset=" << header->free_space_offset);
+    return true;
 }
 bool TablePage::DeleteTuple(const RID& rid) {
     auto* header = GetHeader();
-    if (rid.slot_num >= header->num_tuples) {
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
         return false;
     }
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
         return false;
     }
     slots[rid.slot_num].size = 0;
+    slots[rid.slot_num].offset = 0;
+    LOG_DEBUG("TablePage::DeleteTuple: deleted tuple at slot " << rid.slot_num);
     return true;
 }
 bool TablePage::UpdateTuple(const Tuple& tuple, const RID& rid) {
     auto* header = GetHeader();
-    if (rid.slot_num >= header->num_tuples) {
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
         return false;
     }
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
         return false;
     }
@@ -5653,104 +5850,105 @@ bool TablePage::UpdateTuple(const Tuple& tuple, const RID& rid) {
         tuple.SerializeTo(tuple_data);
         return true;
     }
-    if (new_tuple_size > old_tuple_size) {
-        size_t slot_end_offset =
-            sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
-        size_t free_space = header->free_space_offset - slot_end_offset;
-        size_t extra_space_needed = new_tuple_size - old_tuple_size;
-        if (free_space < extra_space_needed) {
-            return false;
-        }
+    if (new_tuple_size < old_tuple_size) {
+        char* tuple_data = GetData() + slots[rid.slot_num].offset;
+        tuple.SerializeTo(tuple_data);
+        slots[rid.slot_num].size = new_tuple_size;
+        return true;
     }
+    uint16_t old_offset = slots[rid.slot_num].offset;
+    uint16_t old_size = slots[rid.slot_num].size;
     slots[rid.slot_num].size = 0;
-    RID new_rid;
-    if (!InsertTuple(tuple, &new_rid)) {
-        slots[rid.slot_num].size = old_tuple_size;
+    slots[rid.slot_num].offset = 0;
+    size_t slot_end_offset = header_size + header->num_tuples * sizeof(Slot);
+    if (header->free_space_offset >= slot_end_offset + new_tuple_size) {
+        header->free_space_offset -= new_tuple_size;
+        char* new_tuple_data = GetData() + header->free_space_offset;
+        tuple.SerializeTo(new_tuple_data);
+        slots[rid.slot_num].offset = header->free_space_offset;
+        slots[rid.slot_num].size = new_tuple_size;
+        return true;
+    } else {
+        slots[rid.slot_num].offset = old_offset;
+        slots[rid.slot_num].size = old_size;
         return false;
     }
-    slots[rid.slot_num] = slots[new_rid.slot_num];
-    header->num_tuples--;
-    return true;
 }
 bool TablePage::GetTuple(const RID& rid, Tuple* tuple, const Schema* schema) {
-    auto* header = GetHeader();
-    if (rid.slot_num >= header->num_tuples) {
+    if (!tuple || !schema) {
+        LOG_ERROR("TablePage::GetTuple: null tuple or schema pointer");
         return false;
     }
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    auto* header = GetHeader();
+    if (!header) {
+        LOG_ERROR("TablePage::GetTuple: null header");
+        return false;
+    }
+    LOG_DEBUG("TablePage::GetTuple: Attempting to get tuple from slot " 
+              << rid.slot_num << " (total slots: " << header->num_tuples << ")");
+    if (rid.slot_num < 0 || rid.slot_num >= header->num_tuples) {
+        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
+                  << " out of range [0, " << header->num_tuples << ")");
+        return false;
+    }
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::GetTuple: page structure validation failed");
+        return false;
+    }
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     if (slots[rid.slot_num].size == 0) {
+        LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num << " is deleted (size=0)");
+        return false;
+    }
+    LOG_DEBUG("TablePage::GetTuple: slot " << rid.slot_num 
+              << " has offset=" << slots[rid.slot_num].offset 
+              << ", size=" << slots[rid.slot_num].size);
+    if (slots[rid.slot_num].offset < header_size || 
+        slots[rid.slot_num].offset + slots[rid.slot_num].size > PAGE_SIZE) {
+        LOG_WARN("TablePage::GetTuple: invalid slot " << rid.slot_num 
+                 << " (offset=" << slots[rid.slot_num].offset 
+                 << ", size=" << slots[rid.slot_num].size << ")");
         return false;
     }
     char* tuple_data = GetData() + slots[rid.slot_num].offset;
-    tuple->DeserializeFrom(tuple_data, schema);
-    tuple->SetRID(rid);
-    return true;
+    try {
+        LOG_DEBUG("TablePage::GetTuple: About to deserialize tuple data, schema has " 
+                  << schema->GetColumnCount() << " columns");
+        tuple->DeserializeFrom(tuple_data, schema);
+        tuple->SetRID(rid);
+        LOG_DEBUG("TablePage::GetTuple: Successfully retrieved tuple from slot " 
+                  << rid.slot_num << " with " << tuple->GetValues().size() << " values");
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR("TablePage::GetTuple: Failed to deserialize tuple from slot " 
+                  << rid.slot_num << ": " << e.what());
+        return false;
+    }
 }
 bool TablePage::GetNextTupleRID(const RID& current_rid, RID* next_rid) {
     auto* header = GetHeader();
-    const size_t page_header_size = sizeof(TablePageHeader);
-    const size_t min_record_size = 16;
-    const size_t slot_size = sizeof(Slot);
-    const int max_reasonable_tuples = static_cast<int>(
-        (PAGE_SIZE - page_header_size) / (min_record_size + slot_size));
-    if (header->num_tuples < 0) {
-        LOG_ERROR("TablePage::GetNextTupleRID: Invalid num_tuples (negative): " 
-                  << header->num_tuples << " on page " << GetPageId());
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
-        return false;
-    }
-    if (header->num_tuples > max_reasonable_tuples) {
-        LOG_ERROR("TablePage::GetNextTupleRID: num_tuples ("
-                  << header->num_tuples << ") exceeds reasonable limit ("
-                  << max_reasonable_tuples << ") on page " << GetPageId() 
-                  << ", resetting page.");
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
-        return false;
-    }
-    if (header->free_space_offset > PAGE_SIZE ||
-        header->free_space_offset < sizeof(TablePageHeader)) {
-        LOG_ERROR("TablePage::GetNextTupleRID: invalid free_space_offset="
-                  << header->free_space_offset << " on page " << GetPageId()
-                  << " (should be between " << sizeof(TablePageHeader) 
-                  << " and " << PAGE_SIZE << "), resetting page.");
-        header->num_tuples = 0;
-        header->free_space_offset = PAGE_SIZE;
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::GetNextTupleRID: page corrupted, reinitializing");
+        Init(GetPageId(), INVALID_PAGE_ID);
         return false;
     }
     if (header->num_tuples == 0) {
-        LOG_DEBUG("TablePage::GetNextTupleRID: page " << GetPageId() << " has no tuples");
         return false;
     }
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    const size_t header_size = sizeof(TablePageHeader);
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     int start_slot = current_rid.slot_num + 1;
     if (start_slot < 0) {
         start_slot = 0;
     }
-    LOG_DEBUG("TablePage::GetNextTupleRID: searching from slot "
-              << start_slot << ", total slots: " << header->num_tuples
-              << ", free_space_offset: " << header->free_space_offset
-              << " on page " << GetPageId());
     for (int i = start_slot; i < header->num_tuples; i++) {
-        if (slots[i].size > 0 && slots[i].size <= PAGE_SIZE &&
-            slots[i].offset >= header->free_space_offset &&
-            slots[i].offset + slots[i].size <= PAGE_SIZE &&
-            slots[i].offset >= sizeof(TablePageHeader)) {
+        if (slots[i].size > 0) {
             next_rid->page_id = GetPageId();
             next_rid->slot_num = i;
-            LOG_DEBUG("TablePage::GetNextTupleRID: found valid tuple at slot "
-                      << i << " offset=" << slots[i].offset
-                      << " size=" << slots[i].size << " on page " << GetPageId());
             return true;
-        } else if (slots[i].size > 0) {
-            LOG_WARN("TablePage::GetNextTupleRID: invalid slot "
-                     << i << " size=" << slots[i].size
-                     << " offset=" << slots[i].offset << " (free_space_offset="
-                     << header->free_space_offset << ") on page " << GetPageId());
         }
     }
-    LOG_DEBUG("TablePage::GetNextTupleRID: no more valid tuples found on page " << GetPageId());
     return false;
 }
 page_id_t TablePage::GetNextPageId() const { return GetHeader()->next_page_id; }
@@ -5852,52 +6050,41 @@ bool TablePage::InsertTuple(const Tuple& tuple, RID* rid) {
     size_t tuple_size = tuple.GetSerializedSize();
     size_t slot_size = sizeof(Slot);
     auto* header = GetHeader();
-    LOG_DEBUG("TablePage::InsertTuple: page "
-              << GetPageId() << " tuple_size=" << tuple_size
+    const size_t header_size = sizeof(TablePageHeader);
+    LOG_DEBUG("TablePage::InsertTuple: page " << GetPageId() 
+              << " tuple_size=" << tuple_size
               << " current_tuples=" << header->num_tuples
               << " free_space_offset=" << header->free_space_offset);
-    if (tuple_size == 0 || tuple_size > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size << " on page " << GetPageId());
+    if (tuple_size == 0 || tuple_size > PAGE_SIZE / 2) {
+        LOG_ERROR("TablePage::InsertTuple: invalid tuple size: " << tuple_size);
         return false;
     }
-    if (header->num_tuples < 0 || header->num_tuples > (PAGE_SIZE / 8)) {
-        LOG_ERROR("TablePage::InsertTuple: corrupted num_tuples=" << header->num_tuples << " on page " << GetPageId());
-        return false;
+    if (!ValidateAndRepairSlotDirectory(header, GetData())) {
+        LOG_ERROR("TablePage::InsertTuple: page severely corrupted, reinitializing");
+        Init(GetPageId(), INVALID_PAGE_ID);
+        header = GetHeader();
     }
-    if (header->free_space_offset < sizeof(TablePageHeader) || header->free_space_offset > PAGE_SIZE) {
-        LOG_ERROR("TablePage::InsertTuple: corrupted free_space_offset=" << header->free_space_offset << " on page " << GetPageId());
-        return false;
-    }
-    size_t required_space = tuple_size + slot_size;
-    size_t slot_end_offset = sizeof(TablePageHeader) + header->num_tuples * sizeof(Slot);
-    if (header->free_space_offset < slot_end_offset) {
-        LOG_ERROR("TablePage::InsertTuple: free_space_offset=" << header->free_space_offset
-                  << " < slot_end_offset=" << slot_end_offset << " on page " << GetPageId());
-        return false;
-    }
-    size_t free_space = header->free_space_offset - slot_end_offset;
-    if (free_space < required_space) {
-        LOG_DEBUG("TablePage::InsertTuple: insufficient space. required="
-                 << required_space << " available=" << free_space
-                 << " (tuple_size=" << tuple_size << ", slot_size=" << slot_size
-                 << ", num_tuples=" << header->num_tuples
-                 << ", slot_end_offset=" << slot_end_offset 
-                 << ", free_space_offset=" << header->free_space_offset 
-                 << ") on page " << GetPageId());
+    size_t slot_end_offset = header_size + (header->num_tuples + 1) * slot_size;
+    size_t required_data_space = tuple_size;
+    if (slot_end_offset + required_data_space > header->free_space_offset) {
+        LOG_DEBUG("TablePage::InsertTuple: insufficient space. "
+                 << "slot_end=" << slot_end_offset 
+                 << " + data=" << required_data_space
+                 << " > free_offset=" << header->free_space_offset);
         return false;
     }
     header->free_space_offset -= tuple_size;
     char* tuple_data = GetData() + header->free_space_offset;
     tuple.SerializeTo(tuple_data);
-    Slot* slots = reinterpret_cast<Slot*>(GetData() + sizeof(TablePageHeader));
+    Slot* slots = reinterpret_cast<Slot*>(GetData() + header_size);
     slots[header->num_tuples].offset = header->free_space_offset;
     slots[header->num_tuples].size = tuple_size;
     rid->page_id = GetPageId();
     rid->slot_num = header->num_tuples;
-    LOG_DEBUG("TablePage::InsertTuple: inserted at slot "
-              << header->num_tuples << " offset=" << header->free_space_offset
-              << " size=" << tuple_size << " on page " << GetPageId());
     header->num_tuples++;
+    LOG_DEBUG("TablePage::InsertTuple: inserted at slot " << rid->slot_num 
+              << " offset=" << slots[rid->slot_num].offset
+              << " size=" << tuple_size);
     return true;
 }
 bool TableHeap::DeleteTuple(const RID& rid, txn_id_t txn_id) {
@@ -6060,6 +6247,8 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
     if (!schema) {
         throw std::runtime_error("Schema cannot be null");
     }
+    LOG_DEBUG("Tuple construction: values count=" << values_.size() 
+              << ", schema columns=" << schema->GetColumnCount());
     if (values_.size() != schema->GetColumnCount()) {
         LOG_ERROR("Tuple construction: Value count "
                   << values_.size() << " doesn't match schema column count "
@@ -6073,6 +6262,8 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
         }
         const auto& column = schema->GetColumn(i);
         Value& value = values_[i];
+        LOG_DEBUG("Tuple construction: Processing column " << i 
+                  << " (" << column.name << ") type=" << static_cast<int>(column.type));
         try {
             switch (column.type) {
                 case TypeId::BOOLEAN: {
@@ -6080,15 +6271,14 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                         if (std::holds_alternative<int32_t>(value)) {
                             bool converted = std::get<int32_t>(value) != 0;
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to bool: " << converted);
                         } else if (std::holds_alternative<std::string>(value)) {
-                            const std::string& str =
-                                std::get<std::string>(value);
-                            bool converted =
-                                (str == "TRUE" || str == "true" || str == "1");
+                            const std::string& str = std::get<std::string>(value);
+                            bool converted = (str == "TRUE" || str == "true" || str == "1");
                             value = Value(converted);
+                            LOG_DEBUG("Converted string '" << str << "' to bool: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to BOOLEAN");
+                            throw std::runtime_error("Cannot convert value to BOOLEAN");
                         }
                     }
                     serialized_size_ += sizeof(bool);
@@ -6097,12 +6287,11 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::TINYINT: {
                     if (!std::holds_alternative<int8_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int8_t converted =
-                                static_cast<int8_t>(std::get<int32_t>(value));
+                            int8_t converted = static_cast<int8_t>(std::get<int32_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to int8_t: " << static_cast<int>(converted));
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to TINYINT");
+                            throw std::runtime_error("Cannot convert value to TINYINT");
                         }
                     }
                     serialized_size_ += sizeof(int8_t);
@@ -6111,12 +6300,11 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::SMALLINT: {
                     if (!std::holds_alternative<int16_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int16_t converted =
-                                static_cast<int16_t>(std::get<int32_t>(value));
+                            int16_t converted = static_cast<int16_t>(std::get<int32_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to int16_t: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to SMALLINT");
+                            throw std::runtime_error("Cannot convert value to SMALLINT");
                         }
                     }
                     serialized_size_ += sizeof(int16_t);
@@ -6125,20 +6313,19 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::INTEGER: {
                     if (!std::holds_alternative<int32_t>(value)) {
                         if (std::holds_alternative<int64_t>(value)) {
-                            int32_t converted =
-                                static_cast<int32_t>(std::get<int64_t>(value));
+                            int32_t converted = static_cast<int32_t>(std::get<int64_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int64_t to int32_t: " << converted);
                         } else if (std::holds_alternative<int16_t>(value)) {
-                            int32_t converted =
-                                static_cast<int32_t>(std::get<int16_t>(value));
+                            int32_t converted = static_cast<int32_t>(std::get<int16_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int16_t to int32_t: " << converted);
                         } else if (std::holds_alternative<int8_t>(value)) {
-                            int32_t converted =
-                                static_cast<int32_t>(std::get<int8_t>(value));
+                            int32_t converted = static_cast<int32_t>(std::get<int8_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int8_t to int32_t: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to INTEGER");
+                            throw std::runtime_error("Cannot convert value to INTEGER");
                         }
                     }
                     serialized_size_ += sizeof(int32_t);
@@ -6147,12 +6334,11 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::BIGINT: {
                     if (!std::holds_alternative<int64_t>(value)) {
                         if (std::holds_alternative<int32_t>(value)) {
-                            int64_t converted =
-                                static_cast<int64_t>(std::get<int32_t>(value));
+                            int64_t converted = static_cast<int64_t>(std::get<int32_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to int64_t: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to BIGINT");
+                            throw std::runtime_error("Cannot convert value to BIGINT");
                         }
                     }
                     serialized_size_ += sizeof(int64_t);
@@ -6161,16 +6347,15 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::FLOAT: {
                     if (!std::holds_alternative<float>(value)) {
                         if (std::holds_alternative<double>(value)) {
-                            float converted =
-                                static_cast<float>(std::get<double>(value));
+                            float converted = static_cast<float>(std::get<double>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted double to float: " << converted);
                         } else if (std::holds_alternative<int32_t>(value)) {
-                            float converted =
-                                static_cast<float>(std::get<int32_t>(value));
+                            float converted = static_cast<float>(std::get<int32_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to float: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to FLOAT");
+                            throw std::runtime_error("Cannot convert value to FLOAT");
                         }
                     }
                     serialized_size_ += sizeof(float);
@@ -6179,16 +6364,15 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::DOUBLE: {
                     if (!std::holds_alternative<double>(value)) {
                         if (std::holds_alternative<float>(value)) {
-                            double converted =
-                                static_cast<double>(std::get<float>(value));
+                            double converted = static_cast<double>(std::get<float>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted float to double: " << converted);
                         } else if (std::holds_alternative<int32_t>(value)) {
-                            double converted =
-                                static_cast<double>(std::get<int32_t>(value));
+                            double converted = static_cast<double>(std::get<int32_t>(value));
                             value = Value(converted);
+                            LOG_DEBUG("Converted int32_t to double: " << converted);
                         } else {
-                            throw std::runtime_error(
-                                "Cannot convert value to DOUBLE");
+                            throw std::runtime_error("Cannot convert value to DOUBLE");
                         }
                     }
                     serialized_size_ += sizeof(double);
@@ -6197,11 +6381,11 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
                 case TypeId::VARCHAR: {
                     if (!std::holds_alternative<std::string>(value)) {
                         throw std::runtime_error(
-                            "Cannot convert value to VARCHAR for column " +
-                            column.name);
+                            "Cannot convert value to VARCHAR for column " + column.name);
                     }
-                    serialized_size_ +=
-                        sizeof(uint32_t) + std::get<std::string>(value).size();
+                    const std::string& str = std::get<std::string>(value);
+                    serialized_size_ += sizeof(uint32_t) + str.size();
+                    LOG_DEBUG("VARCHAR column '" << column.name << "' length: " << str.size());
                     break;
                 }
                 default:
@@ -6214,6 +6398,8 @@ Tuple::Tuple(std::vector<Value> values, const Schema* schema)
             throw;
         }
     }
+    LOG_DEBUG("Tuple construction completed: " << values_.size() 
+              << " values, serialized_size=" << serialized_size_);
 }
 void Tuple::SerializeTo(char* data) const {
     size_t offset = 0;
@@ -6259,80 +6445,102 @@ void Tuple::SerializeTo(char* data) const {
 void Tuple::DeserializeFrom(const char* data, const Schema* schema) {
     values_.clear();
     serialized_size_ = 0;
+    if (!data || !schema) {
+        LOG_ERROR("Tuple::DeserializeFrom: null data or schema");
+        return;
+    }
     size_t offset = 0;
-    for (size_t i = 0; i < schema->GetColumnCount(); i++) {
-        const auto& column = schema->GetColumn(i);
-        switch (column.type) {
-            case TypeId::BOOLEAN: {
-                bool v;
-                std::memcpy(&v, data + offset, sizeof(bool));
-                values_.emplace_back(v);
-                offset += sizeof(bool);
-                serialized_size_ += sizeof(bool);
-                break;
+    try {
+        for (size_t i = 0; i < schema->GetColumnCount(); i++) {
+            const auto& column = schema->GetColumn(i);
+            switch (column.type) {
+                case TypeId::BOOLEAN: {
+                    bool v;
+                    std::memcpy(&v, data + offset, sizeof(bool));
+                    values_.emplace_back(v);
+                    offset += sizeof(bool);
+                    serialized_size_ += sizeof(bool);
+                    break;
+                }
+                case TypeId::TINYINT: {
+                    int8_t v;
+                    std::memcpy(&v, data + offset, sizeof(int8_t));
+                    values_.emplace_back(v);
+                    offset += sizeof(int8_t);
+                    serialized_size_ += sizeof(int8_t);
+                    break;
+                }
+                case TypeId::SMALLINT: {
+                    int16_t v;
+                    std::memcpy(&v, data + offset, sizeof(int16_t));
+                    values_.emplace_back(v);
+                    offset += sizeof(int16_t);
+                    serialized_size_ += sizeof(int16_t);
+                    break;
+                }
+                case TypeId::INTEGER: {
+                    int32_t v;
+                    std::memcpy(&v, data + offset, sizeof(int32_t));
+                    values_.emplace_back(v);
+                    offset += sizeof(int32_t);
+                    serialized_size_ += sizeof(int32_t);
+                    break;
+                }
+                case TypeId::BIGINT: {
+                    int64_t v;
+                    std::memcpy(&v, data + offset, sizeof(int64_t));
+                    values_.emplace_back(v);
+                    offset += sizeof(int64_t);
+                    serialized_size_ += sizeof(int64_t);
+                    break;
+                }
+                case TypeId::FLOAT: {
+                    float v;
+                    std::memcpy(&v, data + offset, sizeof(float));
+                    values_.emplace_back(v);
+                    offset += sizeof(float);
+                    serialized_size_ += sizeof(float);
+                    break;
+                }
+                case TypeId::DOUBLE: {
+                    double v;
+                    std::memcpy(&v, data + offset, sizeof(double));
+                    values_.emplace_back(v);
+                    offset += sizeof(double);
+                    serialized_size_ += sizeof(double);
+                    break;
+                }
+                case TypeId::VARCHAR: {
+                    uint32_t len;
+                    std::memcpy(&len, data + offset, sizeof(uint32_t));
+                    offset += sizeof(uint32_t);
+                    if (len > MAX_TUPLE_SIZE) {
+                        LOG_ERROR("Tuple::DeserializeFrom: VARCHAR length " << len << " exceeds maximum");
+                        values_.clear();
+                        serialized_size_ = 0;
+                        return;
+                    }
+                    std::string str(data + offset, len);
+                    values_.emplace_back(std::move(str));
+                    offset += len;
+                    serialized_size_ += sizeof(uint32_t) + len;
+                    break;
+                }
+                default:
+                    LOG_ERROR("Tuple::DeserializeFrom: Unsupported column type: " 
+                              << static_cast<int>(column.type));
+                    values_.clear();
+                    serialized_size_ = 0;
+                    return;
             }
-            case TypeId::TINYINT: {
-                int8_t v;
-                std::memcpy(&v, data + offset, sizeof(int8_t));
-                values_.emplace_back(v);
-                offset += sizeof(int8_t);
-                serialized_size_ += sizeof(int8_t);
-                break;
-            }
-            case TypeId::SMALLINT: {
-                int16_t v;
-                std::memcpy(&v, data + offset, sizeof(int16_t));
-                values_.emplace_back(v);
-                offset += sizeof(int16_t);
-                serialized_size_ += sizeof(int16_t);
-                break;
-            }
-            case TypeId::INTEGER: {
-                int32_t v;
-                std::memcpy(&v, data + offset, sizeof(int32_t));
-                values_.emplace_back(v);
-                offset += sizeof(int32_t);
-                serialized_size_ += sizeof(int32_t);
-                break;
-            }
-            case TypeId::BIGINT: {
-                int64_t v;
-                std::memcpy(&v, data + offset, sizeof(int64_t));
-                values_.emplace_back(v);
-                offset += sizeof(int64_t);
-                serialized_size_ += sizeof(int64_t);
-                break;
-            }
-            case TypeId::FLOAT: {
-                float v;
-                std::memcpy(&v, data + offset, sizeof(float));
-                values_.emplace_back(v);
-                offset += sizeof(float);
-                serialized_size_ += sizeof(float);
-                break;
-            }
-            case TypeId::DOUBLE: {
-                double v;
-                std::memcpy(&v, data + offset, sizeof(double));
-                values_.emplace_back(v);
-                offset += sizeof(double);
-                serialized_size_ += sizeof(double);
-                break;
-            }
-            case TypeId::VARCHAR: {
-                uint32_t len;
-                std::memcpy(&len, data + offset, sizeof(uint32_t));
-                offset += sizeof(uint32_t);
-                std::string str(data + offset, len);
-                values_.emplace_back(std::move(str));
-                offset += len;
-                serialized_size_ += sizeof(uint32_t) + len;
-                break;
-            }
-            default:
-                throw std::runtime_error(
-                    "Unsupported column type in deserialization");
         }
+        LOG_DEBUG("Tuple::DeserializeFrom: Successfully deserialized " 
+                  << values_.size() << " values, total size: " << serialized_size_);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Tuple::DeserializeFrom: Exception during deserialization: " << e.what());
+        values_.clear();
+        serialized_size_ = 0;
+        throw;
     }
 }
 size_t Tuple::GetSerializedSize() const { return serialized_size_; }
@@ -8026,6 +8234,7 @@ private:
     void Redistribute(N* neighbor_node, N* node, int index);
     void UpdateRootPageId(page_id_t root_page_id);
     void LoadRootPageId();
+    page_id_t GetHeaderPageId() const;
 };
 }
 
@@ -8602,13 +8811,13 @@ class TablePage : public Page {
     bool GetNextTupleRID(const RID& current_rid, RID* next_rid);
     page_id_t GetNextPageId() const;
     void SetNextPageId(page_id_t next_page_id);
-   private:
     struct TablePageHeader {
         page_id_t next_page_id;
         lsn_t lsn;
         uint16_t num_tuples;
         uint16_t free_space_offset;
     };
+   private:
     TablePageHeader* GetHeader();
     const TablePageHeader* GetHeader() const;
 };

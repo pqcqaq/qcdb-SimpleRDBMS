@@ -2,6 +2,8 @@
 
 #include "index/b_plus_tree.h"
 
+#include <unordered_set>
+
 #include "common/debug.h"
 #include "common/types.h"
 #include "index/b_plus_tree_page.h"
@@ -15,8 +17,25 @@ BPlusTree<KeyType, ValueType>::BPlusTree(const std::string& name,
     : index_name_(name),
       buffer_pool_manager_(buffer_pool_manager),
       root_page_id_(INVALID_PAGE_ID) {
-    // 尝试从磁盘加载根页面ID
-    LoadRootPageId();
+    if (!buffer_pool_manager_) {
+        throw std::invalid_argument("BufferPoolManager cannot be null");
+    }
+
+    if (index_name_.empty()) {
+        throw std::invalid_argument("Index name cannot be empty");
+    }
+
+    LOG_DEBUG("Creating BPlusTree with name: " << index_name_);
+
+    try {
+        LoadRootPageId();
+        LOG_DEBUG(
+            "BPlusTree constructor completed, root_page_id: " << root_page_id_);
+    } catch (const std::exception& e) {
+        LOG_ERROR(
+            "BPlusTree constructor failed to load root page ID: " << e.what());
+        root_page_id_ = INVALID_PAGE_ID;
+    }
 }
 
 template <typename KeyType, typename ValueType>
@@ -37,69 +56,87 @@ BPlusTree<KeyType, ValueType>::~BPlusTree() {
 
 template <typename KeyType, typename ValueType>
 void BPlusTree<KeyType, ValueType>::LoadRootPageId() {
-    LOG_DEBUG("LoadRootPageId called");
-
-    // 首先检查磁盘是否有页面
+    LOG_DEBUG("LoadRootPageId called for index: " << index_name_);
+    
     int num_pages = buffer_pool_manager_->GetDiskManager()->GetNumPages();
     LOG_DEBUG("Disk has " << num_pages << " pages");
-
-    if (num_pages == 0) {
-        LOG_DEBUG(
-            "New database with no pages, setting root_page_id to INVALID");
+    
+    if (num_pages <= 1) {
+        LOG_DEBUG("Database too small, setting root_page_id to INVALID");
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
-
-    // 尝试获取页面0作为header页面
-    Page* header_page = buffer_pool_manager_->FetchPage(0);
-
+    
+    page_id_t header_page_id = GetHeaderPageId();
+    Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
     if (header_page == nullptr) {
-        LOG_DEBUG("Header page 0 does not exist, assuming new database");
+        LOG_DEBUG("Header page " << header_page_id << " does not exist for index " << index_name_);
         root_page_id_ = INVALID_PAGE_ID;
         return;
     }
-
-    // 读取根页面ID
-    root_page_id_ = *reinterpret_cast<page_id_t*>(header_page->GetData());
-    buffer_pool_manager_->UnpinPage(0, false);
-
-    LOG_DEBUG("Loaded root page ID: " << root_page_id_ << " from header page");
-
-    // 验证根页面是否有效
-    if (root_page_id_ != INVALID_PAGE_ID) {
-        // 检查页面ID是否在有效范围内
-        if (root_page_id_ >= num_pages) {
-            LOG_WARN("Root page " << root_page_id_
-                                  << " is out of range (num_pages=" << num_pages
-                                  << "), resetting to INVALID");
-            root_page_id_ = INVALID_PAGE_ID;
-            UpdateRootPageId(root_page_id_);
-            return;
-        }
-
-        // 验证根页面是否真实存在且有效
-        Page* root_page = buffer_pool_manager_->FetchPage(root_page_id_);
-        if (root_page == nullptr) {
-            LOG_WARN("Root page " << root_page_id_
-                                  << " does not exist, resetting to INVALID");
-            root_page_id_ = INVALID_PAGE_ID;
-            UpdateRootPageId(root_page_id_);
-        } else {
-            // 验证根页面的内容是否合理
-            auto tree_page =
-                reinterpret_cast<BPlusTreePage*>(root_page->GetData());
-            if (tree_page->GetPageId() != root_page_id_) {
-                LOG_WARN("Root page " << root_page_id_
-                                      << " has inconsistent page_id (expected "
-                                      << root_page_id_ << ", got "
-                                      << tree_page->GetPageId()
-                                      << "), resetting to INVALID");
-                root_page_id_ = INVALID_PAGE_ID;
-                UpdateRootPageId(root_page_id_);
-            }
-            buffer_pool_manager_->UnpinPage(root_page_id_, false);
-        }
+    
+    // 计算槽位位置
+    uint32_t hash = 0;
+    for (char c : index_name_) {
+        hash = hash * 31 + static_cast<uint32_t>(c);
     }
+    
+    size_t slot_size = sizeof(page_id_t) + sizeof(uint32_t);
+    size_t max_slots = (PAGE_SIZE - sizeof(uint32_t)) / slot_size;
+    size_t slot_index = hash % max_slots;
+    size_t offset = sizeof(uint32_t) + slot_index * slot_size;
+    
+    char* data = header_page->GetData();
+    
+    // 检查hash是否匹配
+    uint32_t stored_hash = *reinterpret_cast<uint32_t*>(data + offset);
+    page_id_t stored_root_page_id = *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t));
+    
+    buffer_pool_manager_->UnpinPage(header_page_id, false);
+    
+    if (stored_hash != hash) {
+        LOG_DEBUG("Hash mismatch for index " << index_name_ << ", tree is empty");
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    
+    if (stored_root_page_id == INVALID_PAGE_ID || stored_root_page_id >= num_pages) {
+        LOG_DEBUG("Invalid stored root page ID " << stored_root_page_id << " for index " << index_name_);
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    
+    // 验证root page是否存在且有效
+    Page* root_page = buffer_pool_manager_->FetchPage(stored_root_page_id);
+    if (root_page == nullptr) {
+        LOG_WARN("Root page " << stored_root_page_id << " does not exist, resetting to INVALID");
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    
+    auto tree_page = reinterpret_cast<BPlusTreePage*>(root_page->GetData());
+    IndexPageType page_type = tree_page->GetPageType();
+    
+    if (page_type != IndexPageType::LEAF_PAGE && page_type != IndexPageType::INTERNAL_PAGE) {
+        LOG_ERROR("Root page " << stored_root_page_id << " has invalid page type: " 
+                  << static_cast<int>(page_type));
+        buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
+        root_page_id_ = INVALID_PAGE_ID;
+        return;
+    }
+    
+    buffer_pool_manager_->UnpinPage(stored_root_page_id, false);
+    
+    root_page_id_ = stored_root_page_id;
+    LOG_DEBUG("Successfully loaded root page ID: " << root_page_id_ 
+              << " for index: " << index_name_);
+}
+
+template <typename KeyType, typename ValueType>
+page_id_t BPlusTree<KeyType, ValueType>::GetHeaderPageId() const {
+    // 使用固定的page 1作为所有B+Tree的header metadata页面
+    // 在page 1中，我们为每个索引分配一个槽位来存储其root page ID
+    return 1;
 }
 
 template <typename KeyType, typename ValueType>
@@ -108,47 +145,52 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
                                            txn_id_t txn_id) {
     std::lock_guard<std::mutex> lock(latch_);
     (void)txn_id;
-
-    LOG_TRACE("Inserting key: " << key);
+    LOG_TRACE("Inserting key: " << key << " into index: " << index_name_);
 
     if (root_page_id_ == INVALID_PAGE_ID) {
-        LOG_DEBUG("Creating root page for first insertion");
+        LOG_DEBUG(
+            "Creating root page for first insertion in index: " << index_name_);
 
-        // 首先确保页面0（header页面）存在
-        Page* header_page = buffer_pool_manager_->FetchPage(0);
+        // 创建或获取头页面
+        page_id_t header_page_id = GetHeaderPageId();
+        Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
         if (header_page == nullptr) {
-            // 页面0不存在，先创建它
-            page_id_t header_page_id;
-            header_page = buffer_pool_manager_->NewPage(&header_page_id);
+            page_id_t allocated_header_page_id;
+            header_page =
+                buffer_pool_manager_->NewPage(&allocated_header_page_id);
             if (header_page == nullptr) {
                 LOG_ERROR("Failed to create header page");
                 return false;
             }
-            LOG_DEBUG("Created header page with ID: " << header_page_id);
-            // 初始化header页面
+            LOG_DEBUG(
+                "Created header page with ID: " << allocated_header_page_id);
             std::memset(header_page->GetData(), 0, PAGE_SIZE);
             *reinterpret_cast<page_id_t*>(header_page->GetData()) =
                 INVALID_PAGE_ID;
             header_page->SetDirty(true);
-            buffer_pool_manager_->UnpinPage(header_page_id, true);
+            buffer_pool_manager_->UnpinPage(allocated_header_page_id, true);
         } else {
-            buffer_pool_manager_->UnpinPage(0, false);
+            buffer_pool_manager_->UnpinPage(header_page_id, false);
         }
 
-        // 创建根页面（叶子页面）
+        // 创建根页面
         page_id_t new_page_id;
         Page* root_page = buffer_pool_manager_->NewPage(&new_page_id);
         if (root_page == nullptr) {
             LOG_ERROR("Failed to create root page");
             return false;
         }
-
         LOG_DEBUG("Allocated root page with ID: " << new_page_id);
-
         auto root = reinterpret_cast<BPlusTreeLeafPage<KeyType, ValueType>*>(
             root_page->GetData());
         LOG_DEBUG("Initializing root page...");
         root->Init(new_page_id);
+
+        // 确保页面ID被正确设置
+        if (root->GetPageId() != new_page_id) {
+            LOG_WARN("Root page ID not set correctly, fixing...");
+            root->SetPageId(new_page_id);
+        }
 
         LOG_DEBUG("Inserting key " << key << " into root page...");
         if (!root->Insert(key, value)) {
@@ -157,23 +199,24 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
             buffer_pool_manager_->DeletePage(new_page_id);
             return false;
         }
-
         root_page_id_ = new_page_id;
         LOG_DEBUG("Setting root_page_id_ to: " << root_page_id_);
 
-        // 立即更新header页面
+        // 立即更新并持久化header page
         UpdateRootPageId(root_page_id_);
 
-        // 确保页面被标记为dirty
         root_page->SetDirty(true);
         LOG_DEBUG("Unpinning root page...");
         buffer_pool_manager_->UnpinPage(new_page_id, true);
 
-        // 强制刷新根页面和header页面，确保数据写入磁盘
+        // 强制刷新根页面和header页面到磁盘以确保持久化
         buffer_pool_manager_->FlushPage(new_page_id);
-        buffer_pool_manager_->FlushPage(0);  // 总是刷新header页面
 
-        LOG_DEBUG("Created root page and inserted key: " << key);
+        // 也刷新header页面
+        buffer_pool_manager_->FlushPage(header_page_id);
+
+        LOG_DEBUG("Created root page and inserted key: "
+                  << key << ", root_page_id: " << root_page_id_);
         return true;
     }
 
@@ -361,24 +404,54 @@ BPlusTree<KeyType, ValueType>::End() {
 template <typename KeyType, typename ValueType>
 Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
                                                   bool is_write_op) {
-    (void)is_write_op;  // 暂时不使用is_write_op参数
+    (void)is_write_op;
     if (root_page_id_ == INVALID_PAGE_ID) {
         LOG_DEBUG("Tree is empty, root_page_id is invalid");
         return nullptr;
     }
 
     LOG_DEBUG("FindLeafPage: starting from root page " << root_page_id_);
-
     page_id_t current_page_id = root_page_id_;
     Page* current_page = nullptr;
 
+    // 防止无限循环的保护机制
+    std::unordered_set<page_id_t> visited_pages;
+    const int MAX_TREE_DEPTH = 20;  // 合理的最大树深度
+    int depth = 0;
+
     while (true) {
-        // 如果之前有页面，先unpin它
+        // 检查是否已访问过此页面（循环检测）
+        if (visited_pages.count(current_page_id) > 0) {
+            LOG_ERROR(
+                "FindLeafPage: Detected cycle in B+tree traversal at page "
+                << current_page_id);
+            if (current_page != nullptr) {
+                buffer_pool_manager_->UnpinPage(current_page->GetPageId(),
+                                                false);
+            }
+            return nullptr;
+        }
+
+        // 检查树深度
+        if (depth >= MAX_TREE_DEPTH) {
+            LOG_ERROR("FindLeafPage: Tree depth exceeded maximum limit "
+                      << MAX_TREE_DEPTH);
+            if (current_page != nullptr) {
+                buffer_pool_manager_->UnpinPage(current_page->GetPageId(),
+                                                false);
+            }
+            return nullptr;
+        }
+
+        visited_pages.insert(current_page_id);
+        depth++;
+
         if (current_page != nullptr) {
             buffer_pool_manager_->UnpinPage(current_page->GetPageId(), false);
         }
 
-        LOG_TRACE("FindLeafPage: fetching page " << current_page_id);
+        LOG_TRACE("FindLeafPage: fetching page " << current_page_id
+                                                 << " at depth " << depth);
         current_page = buffer_pool_manager_->FetchPage(current_page_id);
         if (current_page == nullptr) {
             LOG_ERROR("Failed to fetch page: "
@@ -390,8 +463,6 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
 
         auto tree_page =
             reinterpret_cast<BPlusTreePage*>(current_page->GetData());
-
-        // 验证页面内容的一致性
         if (tree_page->GetPageId() != current_page_id) {
             LOG_ERROR("Page " << current_page_id
                               << " has inconsistent page_id: "
@@ -401,16 +472,24 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
         }
 
         if (tree_page->IsLeafPage()) {
-            LOG_TRACE("Found leaf page: " << current_page_id);
-            return current_page;  // 返回leaf页面，调用者负责unpin
+            LOG_TRACE("Found leaf page: " << current_page_id << " at depth "
+                                          << depth);
+            return current_page;
         }
 
-        // 内部页面，继续向下查找
         auto internal = reinterpret_cast<BPlusTreeInternalPage<KeyType>*>(
             current_page->GetData());
-        int index = internal->KeyIndex(key);
 
-        // 确保索引在有效范围内
+        // 验证内部页面的有效性
+        if (internal->GetSize() <= 0 ||
+            internal->GetSize() > internal->GetMaxSize()) {
+            LOG_ERROR("Invalid internal page size: "
+                      << internal->GetSize() << " on page " << current_page_id);
+            buffer_pool_manager_->UnpinPage(current_page_id, false);
+            return nullptr;
+        }
+
+        int index = internal->KeyIndex(key);
         if (index < 0) {
             LOG_ERROR("Invalid index returned by KeyIndex: " << index);
             index = 0;
@@ -422,13 +501,21 @@ Page* BPlusTree<KeyType, ValueType>::FindLeafPage(const KeyType& key,
         }
 
         page_id_t next_page_id = internal->ValueAt(index);
-
         LOG_TRACE("Traversing from page " << current_page_id << " to page "
                                           << next_page_id << " at index "
                                           << index);
 
         if (next_page_id == INVALID_PAGE_ID) {
             LOG_ERROR("Invalid next page ID in internal page");
+            buffer_pool_manager_->UnpinPage(current_page_id, false);
+            return nullptr;
+        }
+
+        // 验证下一个页面ID的有效性
+        if (next_page_id >=
+            buffer_pool_manager_->GetDiskManager()->GetNumPages()) {
+            LOG_ERROR("Next page ID " << next_page_id
+                                      << " exceeds database size");
             buffer_pool_manager_->UnpinPage(current_page_id, false);
             return nullptr;
         }
@@ -906,45 +993,51 @@ void BPlusTree<KeyType, ValueType>::Redistribute(N* neighbor_node, N* node,
 
 template <typename KeyType, typename ValueType>
 void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
-    LOG_DEBUG("UpdateRootPageId called with root_page_id: " << root_page_id);
-
-    // 尝试获取页面0作为header页面
-    Page* header_page = buffer_pool_manager_->FetchPage(0);
-
+    LOG_DEBUG("UpdateRootPageId called with root_page_id: " << root_page_id 
+              << " for index: " << index_name_);
+    
+    page_id_t header_page_id = GetHeaderPageId();
+    Page* header_page = buffer_pool_manager_->FetchPage(header_page_id);
+    
     if (header_page == nullptr) {
-        // 页面0不存在，需要创建它
-        LOG_DEBUG("Header page 0 does not exist, creating it...");
-
-        page_id_t header_page_id;
-        header_page = buffer_pool_manager_->NewPage(&header_page_id);
-
+        LOG_DEBUG("Header page " << header_page_id << " does not exist, creating it...");
+        
+        page_id_t allocated_page_id;
+        header_page = buffer_pool_manager_->NewPage(&allocated_page_id);
         if (header_page == nullptr) {
             LOG_ERROR("Failed to create header page");
             return;
         }
-
-        // 如果分配的页面ID不是0，我们需要特殊处理
-        if (header_page_id != 0) {
-            LOG_WARN("Allocated header page has ID " << header_page_id
-                                                     << " instead of 0");
-            // 继续使用分配的页面，但这不是理想情况
-        }
-
-        // 初始化header页面数据
+        
+        LOG_DEBUG("Created header page with ID: " << allocated_page_id);
         std::memset(header_page->GetData(), 0, PAGE_SIZE);
     }
-
-    // 写入根页面ID到header页面的开头
-    *reinterpret_cast<page_id_t*>(header_page->GetData()) = root_page_id;
-
-    // 标记页面为dirty，确保会被写入磁盘
+    
+    // 计算在header page中的偏移量
+    // 使用简单的hash来分配槽位，避免冲突
+    uint32_t hash = 0;
+    for (char c : index_name_) {
+        hash = hash * 31 + static_cast<uint32_t>(c);
+    }
+    
+    // 每个索引在header page中占用8字节（page_id_t + 4字节的名称hash）
+    size_t slot_size = sizeof(page_id_t) + sizeof(uint32_t);
+    size_t max_slots = (PAGE_SIZE - sizeof(uint32_t)) / slot_size; // 保留4字节用于槽位计数
+    size_t slot_index = hash % max_slots;
+    size_t offset = sizeof(uint32_t) + slot_index * slot_size;
+    
+    char* data = header_page->GetData();
+    
+    // 写入hash和root page ID
+    *reinterpret_cast<uint32_t*>(data + offset) = hash;
+    *reinterpret_cast<page_id_t*>(data + offset + sizeof(uint32_t)) = root_page_id;
+    
     header_page->SetDirty(true);
-
-    // Unpin页面，标记为dirty
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
-
-    LOG_DEBUG("Updated header page " << header_page->GetPageId()
-                                     << " with root page ID: " << root_page_id);
+    buffer_pool_manager_->FlushPage(header_page->GetPageId());
+    
+    LOG_DEBUG("Updated header page with root page ID: " << root_page_id
+              << " for index: " << index_name_ << " at slot " << slot_index);
 }
 
 // Iterator implementation

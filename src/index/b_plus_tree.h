@@ -76,6 +76,8 @@ private:
     // Update root page id in header page
     void UpdateRootPageId(page_id_t root_page_id);
     void LoadRootPageId();
+    page_id_t GetHeaderPageId() const;
+
 };
 
 }  // namespace SimpleRDBMS
