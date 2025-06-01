@@ -264,7 +264,7 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
             root_page->SetDirty(true);
             LOG_DEBUG("Unpinning root page...");
             buffer_pool_manager_->UnpinPage(new_page_id, true);
-            buffer_pool_manager_->FlushPage(new_page_id);
+            // buffer_pool_manager_->FlushPage(new_page_id);
 
             LOG_DEBUG("Created root page and inserted key: "
                       << key << ", root_page_id: " << root_page_id_);
@@ -316,8 +316,8 @@ bool BPlusTree<KeyType, ValueType>::Insert(const KeyType& key,
         buffer_pool_manager_->UnpinPage(new_page_id, true);
 
         // 强制刷新到磁盘，确保持久化
-        buffer_pool_manager_->FlushPage(new_page_id);
-        buffer_pool_manager_->FlushPage(header_page_id);
+        // buffer_pool_manager_->FlushPage(new_page_id);
+        // buffer_pool_manager_->FlushPage(header_page_id);
 
         LOG_DEBUG("Created root page and inserted key: "
                   << key << ", root_page_id: " << root_page_id_);
@@ -824,7 +824,7 @@ bool BPlusTree<KeyType, ValueType>::InsertIntoLeaf(
 
     // 立即刷新新创建的页面，确保持久化
     buffer_pool_manager_->UnpinPage(new_page_id, true);
-    buffer_pool_manager_->FlushPage(new_page_id);
+    // buffer_pool_manager_->FlushPage(new_page_id);
 
     return true;
 }
@@ -891,7 +891,7 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
         // 确保新根页面被持久化
         new_root_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(new_root_id, true);
-        buffer_pool_manager_->FlushPage(new_root_id);
+        // buffer_pool_manager_->FlushPage(new_root_id);
 
         LOG_DEBUG("Created new root page: " << new_root_id);
         return;
@@ -917,7 +917,7 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
         new_node->SetParentPageId(parent->GetPageId());
         parent_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page_id, true);
-        buffer_pool_manager_->FlushPage(parent_page_id);
+        // buffer_pool_manager_->FlushPage(parent_page_id);
         LOG_DEBUG("Inserted into parent page successfully");
     } else {
         // 父页面满了，需要分裂父页面
@@ -963,7 +963,7 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
 
                     new_parent_page->SetDirty(true);
                     buffer_pool_manager_->UnpinPage(new_parent_page_id, true);
-                    buffer_pool_manager_->FlushPage(new_parent_page_id);
+                    // buffer_pool_manager_->FlushPage(new_parent_page_id);
                 }
             }
         } catch (const std::exception& e) {
@@ -972,7 +972,7 @@ void BPlusTree<KeyType, ValueType>::InsertIntoParent(BPlusTreePage* old_node,
 
         parent_page->SetDirty(true);
         buffer_pool_manager_->UnpinPage(parent_page_id, true);
-        buffer_pool_manager_->FlushPage(parent_page_id);
+        // buffer_pool_manager_->FlushPage(parent_page_id);
     }
 }
 
@@ -1332,7 +1332,7 @@ void BPlusTree<KeyType, ValueType>::UpdateRootPageId(page_id_t root_page_id) {
 
     header_page->SetDirty(true);
     buffer_pool_manager_->UnpinPage(header_page->GetPageId(), true);
-    buffer_pool_manager_->FlushPage(header_page->GetPageId());
+    // buffer_pool_manager_->FlushPage(header_page->GetPageId());
 
     LOG_DEBUG("Updated header page with root page ID: "
               << root_page_id << " for index: " << index_name_ << " at slot "
