@@ -155,17 +155,17 @@ void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
     LOG_DEBUG("Flushed page " << page_id << " to disk");
 
     // 在Unix系统上调用fsync确保数据真正写入磁盘
-#ifdef __unix__
-    FILE* file = fopen(db_file_name_.c_str(), "r+");
-    if (file != nullptr) {
-        int fd = fileno(file);
-        if (fd != -1) {
-            LOG_DEBUG("Calling fsync on file descriptor " << fd);
-            fsync(fd);
-        }
-        fclose(file);
-    }
-#endif
+// #ifdef __unix__
+//     FILE* file = fopen(db_file_name_.c_str(), "r+");
+//     if (file != nullptr) {
+//         int fd = fileno(file);
+//         if (fd != -1) {
+//             LOG_DEBUG("Calling fsync on file descriptor " << fd);
+//             fsync(fd);
+//         }
+//         fclose(file);
+//     }
+// #endif
 
     // 更新页面数量metadata
     if (page_id >= num_pages_) {
